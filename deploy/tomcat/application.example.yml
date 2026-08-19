@@ -1,0 +1,46 @@
+# Боевые настройки survey. Положить в ${catalina.base}/conf/apps/survey/application.yml
+# (например /opt/tomcat11/conf/apps/survey/application.yml), права 600, владелец — учётка Tomcat.
+# Файл лежит вне WAR и переживает обновления приложения.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/survey
+    username: survey_api
+    password: REPLACE_DB_PASSWORD
+
+server:
+  servlet:
+    session:
+      cookie:
+        # за nginx с TLS — true (cookie только по https)
+        secure: true
+
+survey:
+  # Публичный адрес приложения С КОНТЕКСТОМ, без завершающего слэша — из него собираются ссылки для QR и deep-link стенда
+  public-base-url: https://survey.bigcom.ru/survey
+  security:
+    # ≥32 случайных символов; смена секрета обнуляет выданные токены (посетителям придётся подтвердить телефон заново)
+    token-secret: REPLACE_WITH_LONG_RANDOM_SECRET
+    verification-token-valid: 30m
+    gift-token-valid: 30d
+    bootstrap-admin:
+      username: admin
+      display-name: Администратор
+      # нужен только пока реестр пользователей пуст (первый старт); хранится в БД bcrypt-хешем
+      password: REPLACE_INITIAL_ADMIN_PASSWORD
+  verification:
+    code-ttl: 10m
+    max-attempts: 5
+    resend-after: 60s
+    verified-valid: 24h
+    max-calls-per-phone-per-day: 8
+  flash-call:
+    provider: zvonok            # zvonok | stub (stub — ТОЛЬКО тестовый контур: код в логе, звонка нет)
+    public-key: REPLACE_ZVONOK_PUBLIC_KEY
+    campaign-id: REPLACE_ZVONOK_CAMPAIGN_ID
+    timeout: 10s
+  gift-code-length: 6
+
+logging:
+  level:
+    ru.big.survey: INFO

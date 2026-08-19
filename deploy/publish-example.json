@@ -1,0 +1,167 @@
+{
+ "name": "Пример мероприятия",
+ "startsOn": "2026-08-01",
+ "endsOn": "2026-12-31",
+ "giftEnabled": true,
+ "active": true,
+ "theme": {
+  "mode": "light"
+ },
+ "questionnaire": {
+  "enums": {
+   "Города": [
+    "Москва",
+    "Другой..."
+   ],
+   "Интерес": [
+    "по работе",
+    "для себя"
+   ],
+   "Статус": [
+    "Владелец/управляющий салоном",
+    "Индивидуальный мастер",
+    "Работаю в салоне",
+    "Другое"
+   ]
+  },
+  "components": {
+   "Идентификация": {
+    "conditions": "",
+    "required": [
+     "Имя",
+     "Телефон",
+     "Город"
+    ],
+    "data": [
+     {
+      "Фамилия": {
+       "conditions": "",
+       "label": "Фамилия",
+       "element": "inputbox"
+      }
+     },
+     {
+      "Имя": {
+       "conditions": "",
+       "label": "Имя",
+       "element": "inputbox"
+      }
+     },
+     {
+      "Отчество": {
+       "conditions": "",
+       "label": "Отчество (если есть)",
+       "element": "inputbox"
+      }
+     },
+     {
+      "Телефон": {
+       "conditions": "",
+       "label": "Телефон",
+       "element": "inputbox",
+       "mask": "phone"
+      }
+     },
+     {
+      "email": {
+       "conditions": "",
+       "label": "email",
+       "element": "inputbox",
+       "mask": "email"
+      }
+     },
+     {
+      "Город": {
+       "conditions": "",
+       "label": "Город",
+       "element": "radio",
+       "type": "enum",
+       "values": "Города"
+      }
+     },
+     {
+      "Метро": {
+       "conditions": "Город == \"Москва\"",
+       "label": "Метро",
+       "element": "inputbox"
+      }
+     },
+     {
+      "Город": {
+       "conditions": "Город != \"Москва\"",
+       "label": "Город",
+       "element": "inputbox"
+      }
+     }
+    ],
+    "style": ""
+   },
+   "Интерес": {
+    "conditions": "",
+    "required": [],
+    "data": [
+     {
+      "Интерес": {
+       "conditions": "",
+       "label": "Интерес",
+       "element": "radio",
+       "type": "enum",
+       "values": "Интерес",
+       "exeption": "для себя"
+      }
+     }
+    ],
+    "style": ""
+   },
+   "Статус": {
+    "conditions": "",
+    "required": [],
+    "data": [
+     {
+      "Статус": {
+       "conditions": "",
+       "label": "Статус",
+       "element": "radio",
+       "type": "enum",
+       "values": "Статус"
+      }
+     }
+    ],
+    "style": ""
+   },
+   "Бренд": {
+    "conditions": "",
+    "required": [],
+    "data": [
+     {
+      "Бренд": {
+       "conditions": "",
+       "label": "Бренд",
+       "element": "inputbox"
+      }
+     }
+    ],
+    "style": ""
+   }
+  },
+  "schema": [
+   "{Идентификация}",
+   "{Интерес}",
+   "{Статус}",
+   "{Бренд}"
+  ],
+  "style": {},
+  "output": {
+   "Фамилия": "",
+   "Имя": "",
+   "Отчество": "",
+   "Телефон": "",
+   "Город": "",
+   "email": "",
+   "Метро": "",
+   "Интерес": "",
+   "Статус": "",
+   "Бренд": ""
+  }
+ }
+}
