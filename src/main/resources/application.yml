@@ -1,0 +1,81 @@
+spring:
+  config:
+    # Боевые настройки лежат вне WAR: ${catalina.base}/conf/apps/survey/application.yml (см. deploy/tomcat/application.example.yml)
+    import: optional:file:${catalina.base:.}/conf/apps/survey/application.yml
+  application:
+    name: survey
+  datasource:
+    url: ${SURVEY_DB_URL:jdbc:postgresql://localhost:5432/survey}
+    username: ${SURVEY_DB_USERNAME:survey_api}
+    password: ${SURVEY_DB_PASSWORD:}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-request-size: 4MB
+      max-file-size: 4MB
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  forward-headers-strategy: native
+  servlet:
+    session:
+      timeout: 12h
+      cookie:
+        name: SURVEYSESSION
+        http-only: true
+        same-site: lax
+        # secure=true выставляет nginx-терминация TLS через forward-headers; при локальной отладке по http оставить false
+        secure: ${SURVEY_COOKIE_SECURE:false}
+  error:
+    include-message: never
+    include-stacktrace: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    ru.big.survey: INFO
+
+survey:
+  # Публичный адрес приложения (с контекстом) — из него собираются ссылки для QR и deep-link панели стенда
+  public-base-url: ${SURVEY_PUBLIC_BASE_URL:http://localhost:8080}
+  security:
+    # Секрет подписи токенов (верификация телефона, QR подарка). Обязателен в боевом конфиге, ≥32 символов.
+    token-secret: ${SURVEY_TOKEN_SECRET:}
+    verification-token-valid: 30m
+    gift-token-valid: 30d
+    bootstrap-admin:
+      username: admin
+      display-name: Администратор
+      # Нужен только пока реестр пользователей пуст; хранится в БД как bcrypt-хеш
+      password: ${SURVEY_ADMIN_PASSWORD:}
+  verification:
+    code-ttl: 10m
+    max-attempts: 5
+    resend-after: 60s
+    verified-valid: 24h
+    max-calls-per-phone-per-day: 8
+  flash-call:
+    # zvonok — боевой провайдер; stub — код пишется в лог и звонок не делается (только для теста!)
+    provider: ${SURVEY_FLASHCALL_PROVIDER:zvonok}
+    base-url: https://zvonok.com/manager/cabapi_external/api/v1/phones/
+    public-key: ${SURVEY_ZVONOK_PUBLIC_KEY:}
+    campaign-id: ${SURVEY_ZVONOK_CAMPAIGN_ID:}
+    timeout: 10s
+    stub-code: "1234"
+  gift-code-length: 6
