@@ -77,10 +77,18 @@ cd frontend && npm run dev                   # фронт на :5173 с прок
    заполнить пароли, `token-secret`, `public-base-url`, ключи zvonok.com; `chmod 600`, владелец — учётка Tomcat.
 3. **WAR:** `cp target/survey.war ${catalina.base}/webapps/survey.war` — контекст `/survey`; Flyway создаст схему при старте.
    Лог: `${catalina.base}/logs/catalina.out` (строка `Started SurveyApplication`).
-4. **nginx:** `deploy/nginx/survey-proxy.conf` → `/etc/nginx/snippets/`, `deploy/nginx/survey.conf` → `sites-enabled`
-   (уточнить пути к сертификату и подсети ERP для `/api/v1/sync/`), `nginx -t && systemctl reload nginx`.
-5. **DNS/NAT:** `survey.bigcom.ru` → внешний адрес, проброс 443 на nginx. ERP ходит к сервису по внутренней сети
-   (тот же адрес через split-DNS/hosts либо внутренний адрес nginx).
+4. **nginx — два узла** (см. `deploy/nginx/`, схема: Интернет → внешний nginx (TLS, `survey.bigcom.ru`) → внутренний nginx → Tomcat :8080):
+   - на **внутреннем** сервере (где Tomcat): `survey-proxy-headers.conf` → `/etc/nginx/snippets/`, `survey-internal.conf` → `sites-enabled`
+     (заменить `EXTERNAL_NGINX_IP`, подсети ERP в `allow`; при необходимости — внутреннее имя в `server_name`);
+   - на **внешнем** сервере: тот же `survey-proxy-headers.conf` → `/etc/nginx/snippets/`, `survey-external.conf` → `sites-enabled`
+     (заменить `APP_INTERNAL_IP`, пути к wildcard-сертификату). Снаружи `/api/v1/sync/` и `/actuator/` отвечают 404.
+   - на обоих: `nginx -t && systemctl reload nginx`.
+   Ключевое: `Host` и `X-Forwarded-Proto=https` должны дойти до Tomcat неизменными (`server.forward-headers-strategy: native`
+   в приложении) — иначе Secure-cookie не поставится и ссылки будут `http://`. Проверка: `curl -sI https://survey.bigcom.ru/survey/`
+   должен вернуть `200`, а `curl -s https://survey.bigcom.ru/survey/api/v1/public/events/<guid>` — JSON.
+5. **DNS/NAT:** `survey.bigcom.ru` → внешний nginx (443). ERP ходит к сервису **по внутренней сети на внутренний nginx**
+   (`http://<внутренний-адрес>/survey` — именно этот адрес указывается в `УстановитьНастройкиОбмена`, а `public-base-url`
+   в конфиге приложения остаётся внешним `https://survey.bigcom.ru/survey`).
 6. **Первый вход:** `https://survey.bigcom.ru/survey/admin` — логин `admin` и пароль из `bootstrap-admin` (создаётся, только
    пока реестр пуст). Создать пользователей: `erp` (роль INTEGRATION — для 1С), промоутеров (STAFF).
 7. **1С:** `бигАнкетированиеОбменСервер.УстановитьНастройкиОбмена("https://survey.bigcom.ru/survey", "erp", "пароль")`,
