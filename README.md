@@ -91,7 +91,7 @@ cd frontend && npm run dev                   # фронт на :5173 с прок
    в конфиге приложения остаётся внешним `https://survey.bigcom.ru/survey`).
 6. **Первый вход:** `https://survey.bigcom.ru/survey/admin` — логин `admin` и пароль из `bootstrap-admin` (создаётся, только
    пока реестр пуст). Создать пользователей: `erp` (роль INTEGRATION — для 1С), промоутеров (STAFF).
-7. **1С:** `бигАнкетированиеОбменСервер.УстановитьНастройкиОбмена("https://survey.bigcom.ru/survey", "erp", "пароль")`,
+7. **1С:** `бигАнкетированиеОбменСервер.УстановитьНастройкиОбмена("http://<внутренний-адрес>/survey", "erp", "пароль")`,
    далее кнопки в карточке мероприятия (см. `onec/README.md`).
 
 Обновление версии: собрать новый WAR, заменить `webapps/survey.war` (Tomcat передеплоит), миграции применятся сами.
@@ -99,10 +99,12 @@ cd frontend && npm run dev                   # фронт на :5173 с прок
 ## Проверка после развёртывания (smoke)
 
 ```bash
-B=https://survey.bigcom.ru/survey
-curl -s $B/actuator/health                                    # с сервера: {"status":"UP"}; снаружи — 403 (nginx)
-curl -s -o /dev/null -w "%{http_code}\n" $B/api/v1/sync/events/x/status   # снаружи 403, изнутри без пароля 401
-curl -s -u erp:PASS -X PUT -H 'Content-Type: application/json' -d @deploy/publish-example.json $B/api/v1/sync/events/062c3656-b63e-11f0-811c-ac1f6b05c92a
+EXT=https://survey.bigcom.ru/survey; INT=http://<внутренний-адрес>/survey
+curl -s $INT/actuator/health                                   # с сервера приложений: {"status":"UP"}
+curl -s -o /dev/null -w "%{http_code}\n" $EXT/api/v1/sync/events/x/status   # снаружи 404 (закрыто внешним nginx)
+curl -s -o /dev/null -w "%{http_code}\n" $INT/api/v1/sync/events/x/status   # изнутри без пароля 401
+curl -s -u erp:PASS -X PUT -H 'Content-Type: application/json' -d @deploy/publish-example.json $INT/api/v1/sync/events/062c3656-b63e-11f0-811c-ac1f6b05c92a
+curl -sI $EXT/ | head -1                                       # HTTP/2 302 → /survey/ ; Set-Cookie при входе должен содержать Secure
 ```
 Дальше — открыть `publicUrl` с телефона вне сети компании, пройти анкету, отсканировать QR подарка камерой телефона промоутера
 (вход в `/survey/staff`), нажать «Загрузить результаты» в 1С.
