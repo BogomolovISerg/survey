@@ -1,6 +1,11 @@
 /* Анкетирование v2 — базовые стили, mobile-first. Темы: data-theme="light|dark" на <html>. */
 :root {
-  --accent: #7a1f3d;
+  /* Бренд: серый. Неактивные элементы — светло-серые, активные/выбранные — серые. */
+  --accent: #5f6066;
+  --accent-text: #ffffff;
+  --inactive-bg: #f0f0f2;
+  --inactive-border: #dcdce0;
+  --inactive-text: #8a8a90;
   --bg: #ffffff;
   --bg-soft: #f5f5f7;
   --card: #ffffff;
@@ -17,6 +22,11 @@
   color-scheme: light;
 }
 :root[data-theme="dark"] {
+  --accent: #9a9aa2;
+  --accent-text: #111214;
+  --inactive-bg: #26272c;
+  --inactive-border: #3a3b41;
+  --inactive-text: #7d7d84;
   --bg: #111214;
   --bg-soft: #1a1b1e;
   --card: #1e1f23;
@@ -31,9 +41,14 @@
   --shadow: none;
   color-scheme: dark;
 }
+/* Логотип приходит из 1С как картинка на белом фоне. Режим наложения делает фон картинки прозрачным:
+   светлая тема — multiply (белое = прозрачное), тёмная — invert + screen (инвертированный чёрный = прозрачное). */
+.logo img { mix-blend-mode: multiply; }
 :root[data-theme="dark"][data-logo-invert="on"] .logo img {
   filter: invert(1) hue-rotate(180deg);
+  mix-blend-mode: screen;
 }
+:root[data-theme="dark"][data-logo-invert="off"] .logo img { mix-blend-mode: normal; }
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; }
@@ -101,26 +116,31 @@ input.pin { letter-spacing: .4em; font-size: 1.4rem; text-align: center; max-wid
 .opt {
   display: flex; align-items: center; gap: 12px;
   padding: 12px; margin: 6px 0;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: var(--input-bg); cursor: pointer;
+  border: 1px solid var(--inactive-border); border-radius: 10px;
+  background: var(--inactive-bg); color: var(--text); cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
 }
-.opt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--input-bg)); }
+.opt.on { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
 .opt input { width: 20px; height: 20px; accent-color: var(--accent); margin: 0; flex: none; }
+.opt.on input { accent-color: var(--accent-text); }
 .opt span { flex: 1; }
 .consent { display: flex; gap: 10px; align-items: flex-start; font-size: .9rem; margin: 12px 0; }
 .consent input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; margin-top: 2px; }
+.consent a { color: var(--text); text-decoration: underline; }
 
 /* Кнопки */
 button, .btn {
   font: inherit; font-weight: 600;
   border: none; border-radius: 12px;
   padding: 13px 18px;
-  background: var(--accent); color: #fff;
+  background: var(--accent); color: var(--accent-text);
   cursor: pointer;
   text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  transition: background .15s, color .15s;
 }
-button:disabled { opacity: .55; cursor: default; }
-button.secondary, .btn.secondary { background: var(--bg-soft); color: var(--text); border: 1px solid var(--border); }
+button:disabled { background: var(--inactive-bg); color: var(--inactive-text); border: 1px solid var(--inactive-border); cursor: default; }
+button.secondary, .btn.secondary { background: var(--inactive-bg); color: var(--text); border: 1px solid var(--inactive-border); }
+button.secondary:disabled { color: var(--inactive-text); }
 button.ghost { background: transparent; color: var(--accent); padding: 8px 10px; }
 button.danger { background: var(--danger); }
 button.block, .btn.block { width: 100%; }
@@ -160,7 +180,11 @@ button.sm { padding: 8px 12px; font-size: .875rem; border-radius: 9px; }
 .topbar nav { display: flex; gap: 4px; flex-wrap: wrap; }
 .topbar nav a { padding: 6px 10px; border-radius: 8px; text-decoration: none; color: var(--text); font-size: .95rem; }
 .topbar nav a.active { background: var(--bg-soft); font-weight: 600; }
-.theme-toggle { font-size: 1.1rem; background: transparent; color: var(--text); padding: 6px 8px; }
+.theme-toggle {
+  background: transparent; color: var(--muted); padding: 6px; border-radius: 10px; line-height: 0;
+  border: 1px solid transparent;
+}
+.theme-toggle:hover { color: var(--text); background: var(--inactive-bg); border-color: var(--inactive-border); }
 
 /* Счётчики */
 .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
@@ -183,3 +207,19 @@ tr:hover td { background: var(--bg-soft); }
 .code-input { font-size: 1.6rem; letter-spacing: .3em; text-align: center; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Сканер QR в приложении */
+.scanner-view { position: relative; overflow: hidden; border-radius: 12px; background: #000; margin-bottom: 10px; }
+.scanner-view video { width: 100%; max-height: 60vh; object-fit: cover; display: block; }
+.scanner-frame {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(65%, 260px); aspect-ratio: 1;
+  border: 3px solid rgba(255,255,255,.85); border-radius: 16px; pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.3);
+}
+/* Полноэкранный QR анкеты на телефоне сотрудника */
+.qr-overlay { position: fixed; inset: 0; background: #fff; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.qr-overlay .qr-sheet { width: 100%; max-width: 420px; color: #1c1c1e; }
+.qr-overlay .qr svg { width: min(85vw, 360px); }
+.qr-overlay h2, .qr-overlay p { color: #1c1c1e; }
+.qr-overlay button { background: #f0f0f2; color: #1c1c1e; border: 1px solid #dcdce0; }

@@ -1,0 +1,2156 @@
+--- a/README.md
++++ b/README.md
+@@ -43,8 +43,8 @@
+ | Путь | Кто | Назначение |
+ |---|---|---|
+ | `GET /api/v1/public/events/{guid}` | посетитель | схема анкеты (формат v1) + `event` |
+-| `POST …/{guid}/phone/call` `{phone}` | посетитель | flash-call; `already_verified` → сразу токен |
+-| `POST …/{guid}/phone/verify` `{phone, code}` | посетитель | → `{token}` (HMAC, 30 мин) |
++| `POST …/{guid}/phone/call` `{phone}` | посетитель | 404/410, если мероприятия нет или оно закрыто; 503 `busy`, если исчерпан `max-calls-per-day`; flash-call; `already_verified` → сразу токен, только если с запросом пришла cookie `SURVEYDEV` устройства, где этот номер уже подтверждали кодом |
++| `POST …/{guid}/phone/verify` `{phone, code}` | посетитель | → `{token}` (HMAC, 30 мин); при верном коде ставит cookie `SURVEYDEV` |
+ | `POST …/{guid}/responses` `{token, answers, consent}` | посетитель | ответ; 409 `already_submitted` с данными подарка |
+ | `GET …/{guid}/gift?token=` | посетитель | статус подарка, `giftToken/giftCode/giftUrl` для QR |
+ | `POST /api/v1/auth/login|logout`, `GET /api/v1/auth/me` | персонал | сессия в cookie |
+@@ -128,7 +128,10 @@
+ - `/api/v1/sync/**` — Basic + роль INTEGRATION, без сессии; в nginx закрыт снаружи.
+ - Сессии STAFF/ADMIN — cookie `HttpOnly; SameSite=Lax; Secure` (за TLS), 12 ч; CSRF отключён осознанно (JSON-API, SameSite).
+ - Токены верификации телефона и QR подарка — HMAC-SHA256 (усечённый до 128 бит), без состояния, с истечением.
+-- Код flash-call хранится хешем SHA-256(phone:code); TTL 10 мин, 5 попыток, повтор через 60 с, ≤8 звонков/номер/сутки.
++- Код flash-call хранится хешем SHA-256(phone:code); TTL 10 мин, 5 попыток, повтор через 60 с, ≤8 звонков/номер/сутки. Попытка занимается атомарным `UPDATE … WHERE attempts < N` до сравнения кода и сохраняется даже при ответе-ошибке (`noRollbackFor`), поэтому параллельные запросы лимит не обходят.
++- Повторный вход без звонка (24 ч, `survey.verification.verified-valid`) разрешён только устройству, где номер подтверждали кодом: после верного кода браузер получает cookie `SURVEYDEV` (случайный секрет, `HttpOnly; SameSite=Lax; Secure` за TLS, путь `<контекст>/api/v1/public`), в таблице `phone_device` лежит только SHA-256 секрета. Знание номера телефона токен не даёт. Без cookie (очищена, другой браузер, инкогнито) посетитель проходит обычный звонок.
++- Сессии персонала сверяются с БД на каждом запросе (`SessionRevalidationFilter`): отключение пользователя, смена пароля или ролей закрывают его сеансы сразу, а не через 12 часов (`app_user.auth_version`, миграция V12). Смена собственного пароля оставляет текущий сеанс, остальные закрываются; при смене собственных ролей нужно войти заново. После обновления все ранее выданные сессии закроются один раз (в них нет отметки версии), персоналу нужно войти заново.
++- Расходы на звонки: строка номера блокируется на время заказа (параллельные запросы по одному номеру дают один звонок, а не по числу запросов); общий суточный предел `survey.verification.max-calls-per-day` (0 — выключен, задайте под ожидаемое число посетителей; на подтверждённые устройства не действует); в nginx отдельный предел `survey_call` на `…/phone/call` (по умолчанию 30 запросов/мин с IP, burst 20 — при общем Wi-Fi площадки подберите под число людей; лимит ставится на nginx, который видит адрес посетителя: краевой nginx перед IIS (`deploy/nginx/survey-edge-ratelimit.conf`) или внутренний при IIS на границе, см. `deploy/iis/README.md`). Шаги `phone/call` и `phone/verify` работают только для существующего и открытого мероприятия.
+ - Телефоны в логах маскируются; персоналу стенда телефон/e-mail не отдаются; actuator наружу закрыт.
+ - Пароли — bcrypt; первый администратор — из конфига только при пустом реестре.
+ 
+--- a/deploy/iis/README.md
++++ b/deploy/iis/README.md
+@@ -1,6 +1,8 @@
+ # Публикация survey наружу через IIS (erp-web) + ARR
+ 
+-Схема, когда внешний адрес компании проброшен на IIS (erp-web), а сервис живёт на 10.0.0.4:
++Схема A (описана ниже), когда внешний адрес компании проброшен прямо на IIS (erp-web), а сервис живёт на 10.0.0.4.
++Если у вас перед IIS стоит свой nginx (интернет → nginx → IIS → Tomcat), см. раздел «Схема B» ниже: там лимиты и
++передача адреса посетителя устроены иначе.
+ 
+ ```
+ Интернет ──443──▶ IIS erp-web (биндинг survey.bigcom.ru, wildcard *.bigcom.ru, ARR)
+@@ -17,11 +19,74 @@
+    - Enable proxy = ✔
+    - Reverse rewrite host in response headers = ✖ (снять!)
+ 4. Узел сервера → **URL Rewrite → View Server Variables** → добавить `HTTP_X_FORWARDED_PROTO` и `HTTP_X_FORWARDED_HOST`.
++   В том же окне Server Proxy Settings (шаг 3) убедиться, что **Include TCP port from client IP = ✖**: порт в адресе
++   сломает разбор `X-Forwarded-For`.
+ 5. Создать пустой каталог `C:\inetpub\survey-proxy`, положить туда `web.config` из этой папки.
+ 6. Новый сайт **survey-proxy**: физический путь — этот каталог; биндинг **https, host name `survey.bigcom.ru`, порт 443,
+    SNI = ✔, сертификат — wildcard `*.bigcom.ru`** (тот же, что на 1cbig). Пул приложений — любой (No Managed Code).
+ 7. Проверка: `https://survey.bigcom.ru/survey/` открывается; `https://survey.bigcom.ru/survey/api/v1/sync/events/x/status` → 404.
+ 
++## Ограничение частоты и защита бюджета на звонки
++
++IIS не умеет считать лимит отдельно для одного пути (`…/phone/call`), поэтому лимит всегда ставится на nginx, который
++видит настоящий адрес посетителя. Какой это nginx, зависит от схемы.
++
++### Схема A: интернет → IIS → внутренний nginx (10.0.0.4) → Tomcat
++
++1. В `web.config` снять комментарий с правила `HTTP_X_FORWARDED_FOR` и объявить эту переменную в URL Rewrite → View
++   Server Variables **до** замены `web.config` (необъявленная переменная даёт 500). Правило перезаписывает
++   `X-Forwarded-For` адресом, который видит IIS: подставленное клиентом значение отбрасывается.
++2. На 10.0.0.4 в `survey-locations.conf` заменить `ERP_WEB_IP/32` (блок `geo`) на внутренний адрес erp-web. Лимиты
++   считаются по последнему элементу `X-Forwarded-For`, но только для запросов от этого адреса. Пока адрес не подставлен,
++   `nginx -t` сообщает об ошибке: так задумано, иначе лимит считался бы по адресу erp-web, то есть для всех сразу.
++   Затем `nginx -t && systemctl reload nginx`.
++3. Dynamic IP Restrictions на сайте `survey-proxy` (по желанию) защищают сам erp-web от потока запросов, но действуют на весь
++   сайт, а не на путь; значения задавайте с большим запасом. На сайте, где работает 1С, не включать.
++
++### Схема B: интернет → nginx → IIS → Tomcat (перед IIS стоит свой nginx)
++
++Здесь именно краевой nginx видит настоящий адрес, IIS и Tomcat видят адрес nginx.
++
++1. Лимиты ставятся на краевом nginx: зоны и `location` из `../nginx/survey-edge-ratelimit.conf` (proxy_pass и заголовки
++   скопируйте из вашего существующего `location` для `/survey/`). `survey-locations.conf` в этой схеме не нужен.
++2. **`HTTP_X_FORWARDED_FOR` в `web.config` не включать:** `{REMOTE_ADDR}` на IIS это адрес nginx, и настоящий адрес
++   посетителя, который nginx передал в `X-Forwarded-For`, был бы потерян. IIS (ARR) должен передать заголовок дальше
++   (обычно ARR дописывает адрес nginx в конец; это стоит проверить, см. проверку ниже). Tomcat
++   (`forward-headers-strategy: native`) идёт по `X-Forwarded-For` справа налево, пропускает адреса внутренних прокси
++   (по умолчанию частные диапазоны) и берёт первый внешний, поэтому подставленное клиентом значение ему не мешает.
++   Если у nginx или IIS публичный адрес, добавьте его в `server.tomcat.remoteip.internal-proxies`, иначе Tomcat примет
++   его за посетителя.
++3. **Dynamic IP Restrictions на IIS не включать:** он видит только адрес nginx и либо ничего не ограничит, либо
++   заблокирует сразу всех посетителей, а сайт общий с 1С.
++4. Краевой nginx должен передавать `X-Forwarded-For $proxy_add_x_forwarded_for` (а не затирать его) и `Host`.
++5. Правило «block sync from internet» из `web.config` должно действовать и на хосте, по которому анкета открывается
++   снаружи (например `1cbig.bigcom.ru`).
++
++Суточный предел звонков на весь сервис задаётся в приложении: `survey.verification.max-calls-per-day`
++(см. `deploy/tomcat/application.example.yml`).
++
++## Проверка после настройки
++
++```bash
++# 1. Закрытая интеграция: снаружи должно быть 404 (подставьте внешний хост анкеты)
++curl -s -o /dev/null -w '%{http_code}\n' https://HOST/survey/api/v1/sync/events/x/status
++
++# 2. Лимит срабатывает (звонки не заказываются: случайный GUID даёт 404 до обращения к провайдеру).
++for i in $(seq 1 60); do curl -s -o /dev/null -w '%{http_code}\n' -X POST \
++  -H 'Content-Type: application/json' -d '{"phone":"+70000000000"}' \
++  https://HOST/survey/api/v1/public/events/00000000-0000-0000-0000-000000000000/phone/call; done | sort | uniq -c
++#    ожидаемо: сначала 404, затем 429
++
++# 3. Cookie устройства ставится с Secure (X-Forwarded-Proto: https дошёл до Tomcat): после подтверждения телефона
++#    в ответе /phone/verify заголовок Set-Cookie: SURVEYDEV=…; Secure; HttpOnly; SameSite=Lax
++
++# 4. Схема A: на 10.0.0.4 временно добавить в server{}
++#      log_format survey_ip '$remote_addr xff=[$http_x_forwarded_for] client=$survey_client_ip $request';
++#      access_log /var/log/nginx/survey_ip.log survey_ip;
++#    и открыть анкету с обычного устройства: client= должен быть вашим внешним адресом, а не адресом erp-web.
++#    Схема B: на краевом nginx добавить в журнал $remote_addr и убедиться, что 429 приходит по адресу посетителя.
++```
++
+ ## Важно
+ 
+ - **`/survey/api/v1/sync/` блокируется на IIS** (правило «block sync from internet»). Это обязательно: запросы от IIS приходят
+--- a/deploy/iis/web.config
++++ b/deploy/iis/web.config
+@@ -10,6 +10,8 @@
+       Enable proxy = ON; Reverse rewrite host in response headers = OFF.
+    3) IIS Manager -> узел сервера -> URL Rewrite -> View Server Variables -> Add:
+       HTTP_X_FORWARDED_PROTO, HTTP_X_FORWARDED_HOST  (разрешить их установку правилами).
++      Если включаете необязательное правило с HTTP_X_FORWARDED_FOR (см. ниже), добавьте и её ДО того, как положить
++      этот web.config: установка необъявленной переменной даёт 500.
+ -->
+ <configuration>
+   <system.webServer>
+@@ -34,6 +36,12 @@
+           <serverVariables>
+             <set name="HTTP_X_FORWARDED_PROTO" value="https" />
+             <set name="HTTP_X_FORWARDED_HOST" value="{HTTP_HOST}" />
++            <!-- НЕОБЯЗАТЕЛЬНО, и только если IIS смотрит НАПРЯМУЮ в интернет (перед ним нет nginx/балансировщика):
++                 перезаписать X-Forwarded-For адресом, который видит IIS, чтобы клиент не мог подставить свой.
++                 Если перед IIS стоит nginx, НЕ включать: {REMOTE_ADDR} там адрес nginx, и реальный адрес
++                 посетителя, который nginx передал в X-Forwarded-For, был бы потерян.
++            <set name="HTTP_X_FORWARDED_FOR" value="{REMOTE_ADDR}" />
++            -->
+           </serverVariables>
+         </rule>
+       </rules>
+--- a/deploy/nginx/survey-external.conf
++++ b/deploy/nginx/survey-external.conf
+@@ -5,6 +5,9 @@
+ # Файл → /etc/nginx/sites-available/survey-external.conf → sites-enabled; nginx -t; systemctl reload nginx
+ 
+ limit_req_zone $binary_remote_addr zone=survey_pub:10m rate=10r/s;
++# Заказ звонка стоит денег: отдельный, более строгий предел по IP. Много посетителей за одним адресом (общий Wi-Fi
++# площадки, мобильный NAT) делят этот предел: подберите rate/burst под ожидаемое число людей на площадке.
++limit_req_zone $binary_remote_addr zone=survey_call:10m rate=30r/m;
+ 
+ # Снаружи заголовкам клиента не доверяем: схема — фактическая (https)
+ map $scheme $survey_proto { default $scheme; }
+@@ -40,6 +43,14 @@
+         limit_req zone=survey_pub burst=30 nodelay;
+         proxy_pass http://survey_app;
+         include /etc/nginx/snippets/survey-proxy-headers.conf;
++
++        # Заказ flash-call: действуют оба предела (общий для публичных путей и строгий для звонка)
++        location ~ ^/survey/api/v1/public/events/[^/]+/phone/call$ {
++            limit_req zone=survey_pub burst=30 nodelay;
++            limit_req zone=survey_call burst=20 nodelay;
++            proxy_pass http://survey_app;
++            include /etc/nginx/snippets/survey-proxy-headers.conf;
++        }
+     }
+ 
+     location ^~ /survey/ {
+--- a/deploy/nginx/survey-locations.conf
++++ b/deploy/nginx/survey-locations.conf
+@@ -1,3 +1,6 @@
++# ТОЛЬКО для схемы «IIS на границе → внутренний nginx (10.0.0.4) → Tomcat». Если перед IIS стоит свой nginx
++# (интернет → nginx → IIS → Tomcat), этот файл не нужен: лимиты — на краевом nginx, см. survey-edge-ratelimit.conf.
++#
+ # survey: фрагменты для ВНУТРЕННЕГО nginx, где приложения публикуются локейшенами
+ # внутри одного server{} в /etc/nginx/sites-enabled/default (как /devrestore/, /tokenization/).
+ #
+@@ -12,6 +15,30 @@
+     "http"  "http";
+ }
+ 
++# 1а) Лимиты частоты по адресу ПОСЕТИТЕЛЯ (вне server{}, рядом с map выше).
++#    Через IIS (ARR) все запросы приходят на этот nginx с одного адреса erp-web, поэтому $remote_addr для лимитов
++#    непригоден: все посетители считались бы одним клиентом. Реальный адрес — последний элемент X-Forwarded-For:
++#    его выставляет IIS (см. deploy/iis/web.config), всё, что мог подставить клиент, стоит левее.
++#    ERP_WEB_IP — внутренний адрес erp-web (если узлов IIS несколько — по строке на каждый). Это блок geo: пока
++#    ERP_WEB_IP не заменён на настоящий адрес, `nginx -t` падает, то есть забытую подстановку не пропустить.
++#    Если IIS заголовок не передал, ключ пустой и запрос в лимите не учитывается (отказ в пользу доступности).
++map $http_x_forwarded_for $survey_xff_last {
++    default "";
++    "~(?<last>[^,\s]+)\s*$" $last;
++}
++geo $survey_via_iis {
++    default          0;
++    ERP_WEB_IP/32    1;
++}
++map $survey_via_iis $survey_client_ip {
++    default  $remote_addr;      # прямое обращение по внутренней сети (не через IIS)
++    1        $survey_xff_last;  # через IIS
++}
++limit_req_zone $survey_client_ip zone=survey_pub:10m  rate=10r/s;   # публичный API анкеты
++# Заказ звонка стоит денег: отдельный, более строгий предел. Посетители за одним адресом (общий Wi-Fi площадки,
++# мобильный NAT) делят его: подберите rate/burst под ожидаемое число людей на площадке одновременно.
++limit_req_zone $survey_client_ip zone=survey_call:10m rate=30r/m;
++
+ # 2) локейшены — внутрь server{}, рядом с остальными приложениями.
+ 
+ location = /survey { return 301 /survey/; }
+@@ -44,7 +71,30 @@
+     proxy_set_header Host       $host;
+ }
+ 
+-# всё остальное приложение: анкета, панель стенда, админка, публичный API
++# публичный API анкеты: ограничение частоты по IP посетителя
++location ^~ /survey/api/v1/public/ {
++    limit_req zone=survey_pub burst=30 nodelay;
++    limit_req_status 429;
++
++    proxy_pass http://tomcat;
++    proxy_http_version 1.1;
++    proxy_set_header Connection        "";
++    proxy_set_header Host              $host;
++    proxy_set_header X-Real-IP         $remote_addr;
++    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
++    proxy_set_header X-Forwarded-Proto $survey_proto;
++    proxy_set_header X-Forwarded-Host  $host;
++    proxy_read_timeout 60s;
++
++    # Заказ flash-call: действуют оба предела (заголовки проксирования наследуются от внешнего location)
++    location ~ ^/survey/api/v1/public/events/[^/]+/phone/call$ {
++        limit_req zone=survey_pub burst=30 nodelay;
++        limit_req zone=survey_call burst=20 nodelay;
++        proxy_pass http://tomcat;
++    }
++}
++
++# всё остальное приложение: анкета, панель стенда, админка
+ location ^~ /survey/ {
+     proxy_pass http://tomcat;
+     proxy_http_version 1.1;
+--- a/deploy/nginx/survey-tls.conf
++++ b/deploy/nginx/survey-tls.conf
+@@ -10,6 +10,9 @@
+ # должен быть https://survey.bigcom.ru:8443/survey — тогда QR и ссылки соберутся с портом.
+ 
+ limit_req_zone $binary_remote_addr zone=survey_pub2:10m rate=10r/s;
++# Заказ звонка стоит денег: отдельный, более строгий предел по IP. Много посетителей за одним адресом (общий Wi-Fi
++# площадки, мобильный NAT) делят этот предел: подберите rate/burst под ожидаемое число людей на площадке.
++limit_req_zone $binary_remote_addr zone=survey_call2:10m rate=30r/m;
+ 
+ server {
+     listen 443 ssl;
+@@ -38,6 +41,21 @@
+         proxy_set_header X-Forwarded-Proto https;
+         proxy_set_header X-Forwarded-Host  $host;
+         proxy_read_timeout 60s;
++
++        # Заказ flash-call: действуют оба предела (общий для публичных путей и строгий для звонка)
++        location ~ ^/survey/api/v1/public/events/[^/]+/phone/call$ {
++            limit_req zone=survey_pub2 burst=30 nodelay;
++            limit_req zone=survey_call2 burst=20 nodelay;
++            proxy_pass http://tomcat;
++            proxy_http_version 1.1;
++            proxy_set_header Connection        "";
++            proxy_set_header Host              $host;
++            proxy_set_header X-Real-IP         $remote_addr;
++            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
++            proxy_set_header X-Forwarded-Proto https;
++            proxy_set_header X-Forwarded-Host  $host;
++            proxy_read_timeout 60s;
++        }
+     }
+ 
+     location ^~ /survey/ {
+--- a/deploy/tomcat/application.example.yml
++++ b/deploy/tomcat/application.example.yml
+@@ -34,6 +34,10 @@
+     resend-after: 60s
+     verified-valid: 24h
+     max-calls-per-phone-per-day: 8
++    # Общий суточный предел заказов звонка на весь сервис (защита бюджета от массового заказа с разных номеров и адресов).
++    # 0 — без ограничения. Задайте с запасом к ожидаемому числу посетителей за сутки; при превышении посетитель
++    # видит «сервис временно недоступен», подтверждённые устройства продолжают работать.
++    max-calls-per-day: 0
+   flash-call:
+     provider: zvonok            # zvonok | stub (stub — ТОЛЬКО тестовый контур: код в логе, звонка нет)
+     public-key: REPLACE_ZVONOK_PUBLIC_KEY
+--- a/src/main/java/ru/big/survey/api/AdminController.java
++++ b/src/main/java/ru/big/survey/api/AdminController.java
+@@ -1,6 +1,8 @@
+ package ru.big.survey.api;
+ 
++import jakarta.servlet.http.HttpServletRequest;
+ import jakarta.servlet.http.HttpServletResponse;
++import jakarta.servlet.http.HttpSession;
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
+ import java.io.Writer;
+@@ -21,6 +23,7 @@
+ import ru.big.survey.domain.AppUser;
+ import ru.big.survey.domain.Role;
+ import ru.big.survey.security.Actor;
++import ru.big.survey.security.SessionRevalidationFilter;
+ import ru.big.survey.service.AdminService;
+ import ru.big.survey.service.GiftService;
+ import ru.big.survey.service.UserService;
+@@ -136,9 +139,18 @@
+                                     Boolean blockRejectedMarks, Set<UUID> eventIds) {}
+ 
+     @PatchMapping("/users/{id}")
+-    public Map<String, Object> updateUser(@PathVariable UUID id, @RequestBody UpdateUserRequest request, Authentication auth) {
++    public Map<String, Object> updateUser(@PathVariable UUID id, @RequestBody UpdateUserRequest request, Authentication auth,
++                                          HttpServletRequest http) {
++        Actor actor = Actor.of(auth);
+         AppUser user = users.update(id, request.displayName(), request.password(), request.roles(), request.active(),
+-                request.blockRejectedMarks(), request.eventIds(), Actor.of(auth));
++                request.blockRejectedMarks(), request.eventIds(), actor);
++        // Сменил свой пароль: текущий сеанс остаётся, остальные сеансы этого пользователя закроются. Если менялись роли,
++        // права в сессии устарели, поэтому сеанс не обновляем: после изменения нужно войти заново.
++        HttpSession session = http.getSession(false);
++        if (session != null && user.isActive() && user.getUsername().equals(AppUser.normalizeUsername(actor.username()))
++                && user.getRoles().equals(actor.roles())) {
++            session.setAttribute(SessionRevalidationFilter.VERSION_ATTRIBUTE, user.getAuthVersion());
++        }
+         return AuthController.userView(user);
+     }
+ }
+--- a/src/main/java/ru/big/survey/api/AuthController.java
++++ b/src/main/java/ru/big/survey/api/AuthController.java
+@@ -18,6 +18,7 @@
+ import org.springframework.web.bind.annotation.RequestMapping;
+ import org.springframework.web.bind.annotation.RestController;
+ import ru.big.survey.domain.AppUser;
++import ru.big.survey.security.SessionRevalidationFilter;
+ import ru.big.survey.service.AuditService;
+ import ru.big.survey.service.UserService;
+ 
+@@ -54,6 +55,8 @@
+         }
+         securityContextRepository.saveContext(context, http, response);
+         AppUser user = users.require(authentication.getName());
++        // версия учётных данных на момент входа: при её изменении в БД сессия закроется (SessionRevalidationFilter)
++        http.getSession().setAttribute(SessionRevalidationFilter.VERSION_ATTRIBUTE, user.getAuthVersion());
+         audit.ok(null, "LOGIN", user.getUsername(), Map.of("roles", user.getRoles().toString()));
+         return userView(user);
+     }
+--- a/src/main/java/ru/big/survey/api/PublicController.java
++++ b/src/main/java/ru/big/survey/api/PublicController.java
+@@ -1,6 +1,7 @@
+ package ru.big.survey.api;
+ 
+ import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
+ import jakarta.validation.constraints.NotBlank;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+@@ -14,6 +15,7 @@
+ import org.springframework.web.bind.annotation.RequestMapping;
+ import org.springframework.web.bind.annotation.RequestParam;
+ import org.springframework.web.bind.annotation.RestController;
++import ru.big.survey.config.SurveyProperties;
+ import ru.big.survey.service.Json;
+ import ru.big.survey.service.PhoneVerificationService;
+ import ru.big.survey.service.ResponseService;
+@@ -23,7 +25,8 @@
+ /**
+  * Публичный API анкеты (без авторизации; защита — токены и лимиты).
+  *   GET  /api/v1/public/events/{guid}                    — схема анкеты
+- *   POST /api/v1/public/events/{guid}/phone/call         — заказать flash-call {phone}
++ *   POST /api/v1/public/events/{guid}/phone/call         — заказать flash-call {phone}; с cookie SURVEYDEV известного
++ *                                                          устройства звонок не нужен (already_verified + token)
+  *   POST /api/v1/public/events/{guid}/phone/verify       — проверить код {phone, code} → {token}
+  *   POST /api/v1/public/events/{guid}/responses          — отправить ответ {token, answers, consent}
+  *   GET  /api/v1/public/events/{guid}/gift?token=        — статус подарка и данные QR
+@@ -35,11 +38,14 @@
+     private final ResponseService responseService;
+     private final PhoneVerificationService verification;
+     private final Json json;
++    private final SurveyProperties properties;
+ 
+-    public PublicController(ResponseService responseService, PhoneVerificationService verification, Json json) {
++    public PublicController(ResponseService responseService, PhoneVerificationService verification, Json json,
++                            SurveyProperties properties) {
+         this.responseService = responseService;
+         this.verification = verification;
+         this.json = json;
++        this.properties = properties;
+     }
+ 
+     @GetMapping("/{eventId}")
+@@ -50,8 +56,9 @@
+     public record PhoneRequest(@NotBlank String phone) {}
+ 
+     @PostMapping("/{eventId}/phone/call")
+-    public Map<String, Object> call(@PathVariable UUID eventId, @RequestBody PhoneRequest request) {
+-        PhoneVerificationService.CallResult r = verification.call(request.phone());
++    public Map<String, Object> call(@PathVariable UUID eventId, @RequestBody PhoneRequest request, HttpServletRequest http) {
++        responseService.requireOpenEvent(eventId);
++        PhoneVerificationService.CallResult r = verification.call(request.phone(), DeviceCookie.read(http));
+         Map<String, Object> body = new LinkedHashMap<>();
+         body.put("status", r.status());
+         body.put("message", r.message());
+@@ -67,8 +74,12 @@
+     public record VerifyRequest(@NotBlank String phone, @NotBlank String code) {}
+ 
+     @PostMapping("/{eventId}/phone/verify")
+-    public Map<String, Object> verify(@PathVariable UUID eventId, @RequestBody VerifyRequest request) {
++    public Map<String, Object> verify(@PathVariable UUID eventId, @RequestBody VerifyRequest request,
++                                      HttpServletRequest http, HttpServletResponse response) {
++        responseService.requireOpenEvent(eventId);
+         PhoneVerificationService.VerifyResult r = verification.verify(request.phone(), request.code());
++        // cookie живёт столько же, сколько подтверждение телефона на сервере (verified-valid)
++        DeviceCookie.write(http, response, r.deviceSecret(), properties.getVerification().getVerifiedValid());
+         return Map.of("verified", true, "token", r.token(), "validUntil", r.validUntil().toString());
+     }
+ 
+--- a/src/main/java/ru/big/survey/config/SecurityConfig.java
++++ b/src/main/java/ru/big/survey/config/SecurityConfig.java
+@@ -19,11 +19,14 @@
+ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+ import org.springframework.security.crypto.password.PasswordEncoder;
+ import org.springframework.security.web.SecurityFilterChain;
++import org.springframework.security.web.access.intercept.AuthorizationFilter;
+ import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+ import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+ import org.springframework.security.web.context.SecurityContextRepository;
+ import ru.big.survey.domain.Role;
+ import ru.big.survey.security.AppUserDetailsService;
++import ru.big.survey.security.SessionRevalidationFilter;
++import ru.big.survey.security.SessionValidator;
+ import ru.big.survey.service.UserService;
+ 
+ /**
+@@ -89,11 +92,14 @@
+     @Bean
+     @Order(2)
+     SecurityFilterChain appFilterChain(HttpSecurity http, DaoAuthenticationProvider provider,
+-                                       SecurityContextRepository securityContextRepository) throws Exception {
++                                       SecurityContextRepository securityContextRepository,
++                                       SessionValidator sessionValidator) throws Exception {
+         return http
+                 .csrf(csrf -> csrf.disable())
+                 .securityContext(context -> context.securityContextRepository(securityContextRepository))
+                 .authenticationProvider(provider)
++                // сверка вошедшего с БД на каждом запросе: отключение, смена пароля и ролей действуют сразу
++                .addFilterBefore(new SessionRevalidationFilter(sessionValidator), AuthorizationFilter.class)
+                 .authorizeHttpRequests(authorize -> authorize
+                         .requestMatchers("/api/v1/public/**", "/api/v1/auth/login", "/api/v1/auth/me").permitAll()
+                         .requestMatchers("/api/v1/staff/**").hasAnyRole(Role.STAFF.name(), Role.ADMIN.name(), Role.SUPERVISOR.name())
+--- a/src/main/java/ru/big/survey/config/SurveyProperties.java
++++ b/src/main/java/ru/big/survey/config/SurveyProperties.java
+@@ -70,6 +70,8 @@
+         private Duration resendAfter = Duration.ofSeconds(60);
+         private Duration verifiedValid = Duration.ofHours(24);
+         private int maxCallsPerPhonePerDay = 8;
++        /** Общий суточный предел заказов звонка на весь сервис; 0 — без ограничения. */
++        private int maxCallsPerDay = 0;
+ 
+         public Duration getCodeTtl() { return codeTtl; }
+         public void setCodeTtl(Duration codeTtl) { this.codeTtl = codeTtl; }
+@@ -81,6 +83,8 @@
+         public void setVerifiedValid(Duration verifiedValid) { this.verifiedValid = verifiedValid; }
+         public int getMaxCallsPerPhonePerDay() { return maxCallsPerPhonePerDay; }
+         public void setMaxCallsPerPhonePerDay(int maxCallsPerPhonePerDay) { this.maxCallsPerPhonePerDay = maxCallsPerPhonePerDay; }
++        public int getMaxCallsPerDay() { return maxCallsPerDay; }
++        public void setMaxCallsPerDay(int maxCallsPerDay) { this.maxCallsPerDay = maxCallsPerDay; }
+     }
+ 
+     /**
+--- a/src/main/java/ru/big/survey/domain/AppUser.java
++++ b/src/main/java/ru/big/survey/domain/AppUser.java
+@@ -53,6 +53,10 @@
+     @Column(name = "event_id", nullable = false)
+     private Set<UUID> eventIds = new HashSet<>();
+ 
++    /** Растёт при смене пароля, ролей и признака «активен»: сессии с прежней версией закрываются. */
++    @Column(name = "auth_version", nullable = false)
++    private int authVersion;
++
+     @Column(name = "created_at", nullable = false)
+     private Instant createdAt;
+ 
+@@ -73,9 +77,13 @@
+     public void apply(String username, String displayName, String passwordHash, Set<Role> roles, Instant now) {
+         this.username = normalizeUsername(username);
+         this.displayName = displayName == null ? this.username : displayName.trim();
++        boolean rolesChanged = !this.roles.equals(roles);
+         if (passwordHash != null) {
+             this.passwordHash = passwordHash;
+         }
++        if (passwordHash != null || rolesChanged) {
++            this.authVersion++;
++        }
+         this.roles.clear();
+         this.roles.addAll(roles);
+         this.updatedAt = now;
+@@ -90,6 +98,9 @@
+     }
+ 
+     public void setActive(boolean active, Instant now) {
++        if (this.active != active) {
++            this.authVersion++;   // и при отключении, и при повторном включении: старые сессии не должны «ожить»
++        }
+         this.active = active;
+         this.updatedAt = now;
+     }
+@@ -109,6 +120,7 @@
+     public String getPasswordHash() { return passwordHash; }
+     public boolean isActive() { return active; }
+     public boolean isBlockRejectedMarks() { return blockRejectedMarks; }
++    public int getAuthVersion() { return authVersion; }
+     public Set<Role> getRoles() { return Set.copyOf(roles); }
+     public Set<UUID> getEventIds() { return Set.copyOf(eventIds); }
+     public Instant getCreatedAt() { return createdAt; }
+--- a/src/main/java/ru/big/survey/domain/PhoneVerification.java
++++ b/src/main/java/ru/big/survey/domain/PhoneVerification.java
+@@ -69,10 +69,6 @@
+         callsToday++;
+     }
+ 
+-    public void registerAttempt() {
+-        this.attempts++;
+-    }
+-
+     public void markVerified(Instant now, Instant verifiedUntil) {
+         this.verified = true;
+         this.verifiedAt = now;
+--- a/src/main/java/ru/big/survey/persistence/AppUserRepository.java
++++ b/src/main/java/ru/big/survey/persistence/AppUserRepository.java
+@@ -12,6 +12,9 @@
+ 
+     Optional<AppUser> findByUsernameAndActiveTrue(String username);
+ 
++    /** Для проверки живой сессии на каждом запросе: только признак активности и версия. */
++    Optional<UserSessionState> findStateByUsername(String username);
++
+     List<AppUser> findAllByOrderByUsernameAsc();
+ 
+     long countByActiveTrue();
+--- a/src/main/java/ru/big/survey/persistence/PhoneVerificationRepository.java
++++ b/src/main/java/ru/big/survey/persistence/PhoneVerificationRepository.java
+@@ -1,7 +1,10 @@
+ package ru.big.survey.persistence;
+ 
++import jakarta.persistence.LockModeType;
+ import java.time.Instant;
++import java.util.Optional;
+ import org.springframework.data.jpa.repository.JpaRepository;
++import org.springframework.data.jpa.repository.Lock;
+ import org.springframework.data.jpa.repository.Modifying;
+ import org.springframework.data.jpa.repository.Query;
+ import org.springframework.data.repository.query.Param;
+@@ -12,4 +15,35 @@
+     @Modifying
+     @Query("delete from PhoneVerification v where v.expiresAt is not null and v.expiresAt < :before")
+     int deleteExpired(@Param("before") Instant before);
++
++    /** Создаёт пустую строку телефона, если её ещё нет (параллельные вставки безопасны). */
++    @Modifying
++    @Query(value = """
++            insert into phone_verification (phone, attempts, verified, created_at, calls_today)
++            values (:phone, 0, false, :now, 0)
++            on conflict (phone) do nothing
++            """, nativeQuery = true)
++    int insertIfAbsent(@Param("phone") String phone, @Param("now") Instant now);
++
++    /**
++     * Строка телефона под блокировкой до конца транзакции: параллельные заказы звонка на один номер выстраиваются
++     * в очередь и видят результат друг друга (иначе окно повтора и суточный лимит обходятся запросами «в один момент»).
++     */
++    @Lock(LockModeType.PESSIMISTIC_WRITE)
++    @Query("select v from PhoneVerification v where v.phone = :phone")
++    Optional<PhoneVerification> findForUpdate(@Param("phone") String phone);
++
++    /**
++     * Атомарно занимает одну попытку ввода кода одним UPDATE: условие {@code attempts < :max} проверяется под
++     * блокировкой строки, поэтому параллельные запросы не могут проверить больше {@code max} кодов.
++     * Возвращает 1, если попытка занята и код можно сравнивать, и 0, если кода нет, он истёк, уже подтверждён или
++     * попытки исчерпаны. Контекст сбрасывается, чтобы следующее чтение увидело новое значение счётчика.
++     */
++    @Modifying(flushAutomatically = true, clearAutomatically = true)
++    @Query("""
++            update PhoneVerification v set v.attempts = v.attempts + 1
++            where v.phone = :phone and v.verified = false and v.codeHash is not null
++              and v.expiresAt > :now and v.attempts < :max
++            """)
++    int claimAttempt(@Param("phone") String phone, @Param("now") Instant now, @Param("max") int max);
+ }
+--- a/src/main/java/ru/big/survey/service/PhoneVerificationService.java
++++ b/src/main/java/ru/big/survey/service/PhoneVerificationService.java
+@@ -13,12 +13,17 @@
+ import org.springframework.transaction.annotation.Transactional;
+ import ru.big.survey.config.SurveyProperties;
+ import ru.big.survey.domain.PhoneVerification;
++import ru.big.survey.domain.CallBudget;
++import ru.big.survey.persistence.CallBudgetRepository;
++import ru.big.survey.persistence.PhoneDeviceRepository;
+ import ru.big.survey.persistence.PhoneVerificationRepository;
+ 
+ /**
+  * Подтверждение телефона flash-call (логика v1): код хранится как SHA-256(phone:code), TTL, лимит попыток,
+  * повтор звонка не чаще resend-after, подтверждение действует verified-valid — повторный звонок не нужен.
+  * После подтверждения выдаётся токен (TokenService), с ним посетитель отправляет анкету.
++ * Повторно токен без звонка выдаётся только тому браузеру, где телефон уже подтверждали кодом: секрет устройства
++ * лежит в cookie посетителя, а здесь сверяется его хеш (таблица phone_device). Знания номера для этого недостаточно.
+  */
+ @Service
+ public class PhoneVerificationService {
+@@ -26,15 +31,23 @@
+     private static final Logger log = LoggerFactory.getLogger(PhoneVerificationService.class);
+     private static final ZoneId ZONE = ZoneId.of("Europe/Moscow");
+ 
++    /** Сутки, за которые уже записано предупреждение об исчерпании бюджета (чтобы не засорять журнал). */
++    private volatile LocalDate budgetWarnedOn;
++
+     private final PhoneVerificationRepository verifications;
++    private final PhoneDeviceRepository devices;
++    private final CallBudgetRepository budgets;
+     private final FlashCallClient flashCall;
+     private final TokenService tokens;
+     private final SurveyProperties properties;
+     private final Clock clock;
+ 
+-    public PhoneVerificationService(PhoneVerificationRepository verifications, FlashCallClient flashCall,
+-                                    TokenService tokens, SurveyProperties properties, Clock clock) {
++    public PhoneVerificationService(PhoneVerificationRepository verifications, PhoneDeviceRepository devices,
++                                    CallBudgetRepository budgets, FlashCallClient flashCall, TokenService tokens,
++                                    SurveyProperties properties, Clock clock) {
+         this.verifications = verifications;
++        this.devices = devices;
++        this.budgets = budgets;
+         this.flashCall = flashCall;
+         this.tokens = tokens;
+         this.properties = properties;
+@@ -44,18 +57,40 @@
+     /** status: called | already_verified | wait */
+     public record CallResult(String status, String message, long ttlSeconds, int attempts, long retryAfterSeconds, String token) {}
+ 
+-    public record VerifyResult(String token, Instant validUntil) {}
++    /** deviceSecret — новый секрет устройства: контроллер кладёт его в cookie браузера. */
++    public record VerifyResult(String token, Instant validUntil, String deviceSecret) {}
+ 
++    /**
++     * @param deviceSecret значение cookie устройства (или null, если cookie нет). Если на этом устройстве телефон уже
++     *                     подтверждали и срок не вышел — звонок не нужен, сразу выдаётся токен.
++     */
+     @Transactional
+-    public CallResult call(String rawPhone) {
++    public CallResult call(String rawPhone, String deviceSecret) {
+         String phone = requireValidPhone(rawPhone);
+         SurveyProperties.Verification cfg = properties.getVerification();
+         Instant now = clock.instant();
+-        PhoneVerification v = verifications.findById(phone).orElseGet(() -> PhoneVerification.create(phone, now));
+ 
+-        if (v.isVerifiedAt(now)) {
++        if (isKnownDevice(phone, deviceSecret, now)) {
+             return new CallResult("already_verified", "Телефон уже подтверждён.", 0, 0, 0, tokens.issueVerification(phone));
+         }
++        LocalDate today = LocalDate.ofInstant(now, ZONE);
++        // Общий суточный бюджет звонков: предел расходов, даже если заказывают с разных номеров и адресов. Проверка без
++        // блокировок (строку счётчика не держим на время обращения к провайдеру); перелёт возможен лишь на число
++        // одновременно идущих запросов
++        int budget = cfg.getMaxCallsPerDay();
++        if (budget > 0 && budgets.findById(today).map(CallBudget::getCalls).orElse(0) >= budget) {
++            if (!today.equals(budgetWarnedOn)) {
++                budgetWarnedOn = today;
++                log.warn("Исчерпан суточный предел звонков ({}), новые звонки не заказываются до завтра", budget);
++            }
++            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "busy",
++                    "Подтверждение телефона временно недоступно. Попробуйте позже или обратитесь к промоутеру.");
++        }
++        // Строка телефона блокируется до конца транзакции: параллельные заказы на один номер выстраиваются в очередь
++        // и видят результат друг друга, поэтому окно повтора и суточный лимит нельзя обойти запросами «в один момент»
++        verifications.insertIfAbsent(phone, now);
++        PhoneVerification v = verifications.findForUpdate(phone)
++                .orElseThrow(() -> new IllegalStateException("Строка проверки телефона не создана"));
+         if (v.getLastCallAt() != null) {
+             long since = now.getEpochSecond() - v.getLastCallAt().getEpochSecond();
+             long wait = cfg.getResendAfter().toSeconds() - since;
+@@ -65,7 +100,6 @@
+                         Math.max(0, cfg.getMaxAttempts() - v.getAttempts()), wait, null);
+             }
+         }
+-        LocalDate today = LocalDate.ofInstant(now, ZONE);
+         if (v.callsOn(today) >= cfg.getMaxCallsPerPhonePerDay()) {
+             throw ApiException.tooMany("Превышено число звонков на этот номер за сутки. Попробуйте завтра или обратитесь к промоутеру.",
+                     Map.of("retryAfter", 3600));
+@@ -74,12 +108,17 @@
+         String code = flashCall.call(phone);
+         v.newCode(TokenService.codeHash(phone, code), now, now.plus(cfg.getCodeTtl()), today);
+         verifications.save(v);
++        budgets.increment(today);   // только после успешного ответа провайдера; при ошибке транзакция откатывается целиком
+         log.info("Flash-call заказан для {}", Phones.mask(phone));
+         return new CallResult("called", "Ожидайте входящий звонок и введите последние 4 цифры номера.",
+                 cfg.getCodeTtl().toSeconds(), cfg.getMaxAttempts(), cfg.getResendAfter().toSeconds(), null);
+     }
+ 
+-    @Transactional
++    /**
++     * noRollbackFor: неверный код сообщается исключением, но занятая попытка должна сохраниться. Иначе Spring откатит
++     * транзакцию вместе со счётчиком, и перебор кода станет безлимитным.
++     */
++    @Transactional(noRollbackFor = ApiException.class)
+     public VerifyResult verify(String rawPhone, String rawCode) {
+         String phone = requireValidPhone(rawPhone);
+         String code = rawCode == null ? "" : rawCode.replaceAll("\\D", "");
+@@ -88,25 +127,24 @@
+         }
+         SurveyProperties.Verification cfg = properties.getVerification();
+         Instant now = clock.instant();
+-        PhoneVerification v = verifications.findById(phone)
+-                .orElseThrow(() -> ApiException.badRequest("no_call", "Сначала закажите звонок."));
+-        if (v.isVerifiedAt(now)) {
+-            return new VerifyResult(tokens.issueVerification(phone), v.getExpiresAt());
+-        }
+-        if (!v.codeIsAlive(now)) {
+-            throw new ApiException(HttpStatus.BAD_REQUEST, "expired", "Код устарел. Закажите звонок ещё раз.");
+-        }
+-        if (v.getAttempts() >= cfg.getMaxAttempts()) {
++        // Попытка занимается атомарно ДО сравнения кода: параллельные запросы не обходят лимит, а токен выдаётся
++        // только за верный код (признак «телефон уже подтверждён» доступа не даёт)
++        if (verifications.claimAttempt(phone, now, cfg.getMaxAttempts()) == 0) {
++            PhoneVerification stale = verifications.findById(phone)
++                    .orElseThrow(() -> ApiException.badRequest("no_call", "Сначала закажите звонок."));
++            if (!stale.codeIsAlive(now)) {
++                throw new ApiException(HttpStatus.BAD_REQUEST, "expired", "Код устарел. Закажите звонок ещё раз.");
++            }
+             throw ApiException.tooMany("Превышено число попыток. Закажите звонок ещё раз.",
+-                    Map.of("retryAfter", Math.max(0, v.getExpiresAt().getEpochSecond() - now.getEpochSecond())));
++                    Map.of("retryAfter", Math.max(0, stale.getExpiresAt().getEpochSecond() - now.getEpochSecond())));
+         }
+-        v.registerAttempt();
++        PhoneVerification v = verifications.findById(phone)
++                .orElseThrow(() -> ApiException.badRequest("no_call", "Сначала закажите звонок."));
+         // Сравниваем последние 4 цифры (посетитель может ввести номер целиком)
+         String tail = code.length() > 4 ? code.substring(code.length() - 4) : code;
+         boolean ok = TokenService.codeHash(phone, tail).equals(v.getCodeHash())
+                 || TokenService.codeHash(phone, code).equals(v.getCodeHash());
+         if (!ok) {
+-            verifications.save(v);
+             int left = Math.max(0, cfg.getMaxAttempts() - v.getAttempts());
+             if (left == 0) {
+                 throw ApiException.tooMany("Код неверный, попытки исчерпаны. Закажите звонок ещё раз.", Map.of("attemptsLeft", 0));
+@@ -117,8 +155,16 @@
+         Instant until = now.plus(cfg.getVerifiedValid());
+         v.markVerified(now, until);
+         verifications.save(v);
++        // Новый секрет на каждое подтверждение: значение, пришедшее в cookie, не переиспользуем (защита от подмены cookie)
++        String deviceSecret = DeviceSecrets.generate();
++        devices.upsert(phone, DeviceSecrets.hash(deviceSecret), now, until);
+         log.info("Телефон {} подтверждён", Phones.mask(phone));
+-        return new VerifyResult(tokens.issueVerification(phone), until);
++        return new VerifyResult(tokens.issueVerification(phone), until, deviceSecret);
++    }
++
++    private boolean isKnownDevice(String phone, String deviceSecret, Instant now) {
++        return DeviceSecrets.isWellFormed(deviceSecret)
++                && devices.existsByPhoneAndDeviceHashAndExpiresAtAfter(phone, DeviceSecrets.hash(deviceSecret), now);
+     }
+ 
+     /** Телефон из токена верификации; 403 если токен невалиден или истёк. */
+@@ -140,9 +186,15 @@
+     @Scheduled(fixedDelayString = "PT1H", initialDelayString = "PT10M")
+     @Transactional
+     public void purgeExpired() {
+-        int removed = verifications.deleteExpired(clock.instant().minusSeconds(24 * 3600));
++        Instant now = clock.instant();
++        int removed = verifications.deleteExpired(now.minusSeconds(24 * 3600));
+         if (removed > 0) {
+             log.info("Удалено истёкших проверок телефонов: {}", removed);
+         }
++        budgets.deleteBefore(LocalDate.ofInstant(now, ZONE).minusDays(7));
++        int removedDevices = devices.deleteExpired(now);
++        if (removedDevices > 0) {
++            log.info("Удалено истёкших устройств посетителей: {}", removedDevices);
++        }
+     }
+ }
+--- a/src/main/java/ru/big/survey/service/ResponseService.java
++++ b/src/main/java/ru/big/survey/service/ResponseService.java
+@@ -52,6 +52,15 @@
+         this.clock = clock;
+     }
+ 
++    /** Шаги подтверждения телефона доступны только для существующего и открытого мероприятия: 404 — нет, 410 — закрыто. */
++    @Transactional(readOnly = true)
++    public void requireOpenEvent(UUID eventId) {
++        Event event = events.findById(eventId).orElseThrow(() -> ApiException.notFound("Анкета не найдена. Отсканируйте QR-код ещё раз."));
++        if (!event.acceptsResponses()) {
++            throw ApiException.gone("Мероприятие завершено, анкета закрыта.");
++        }
++    }
++
+     /** Схема анкеты для клиента (последняя версия) + блок event. 404 — нет мероприятия, 410 — закрыто. */
+     @Transactional(readOnly = true)
+     public ObjectNode publicSchema(UUID eventId) {
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -70,6 +70,10 @@
+     resend-after: 60s
+     verified-valid: 24h
+     max-calls-per-phone-per-day: 8
++    # Общий суточный предел заказов звонка на весь сервис (защита бюджета от массового заказа с разных номеров и адресов).
++    # 0 — без ограничения. Задайте с запасом к ожидаемому числу посетителей за сутки; при превышении посетитель
++    # видит «сервис временно недоступен», подтверждённые устройства продолжают работать.
++    max-calls-per-day: 0
+   flash-call:
+     # zvonok — боевой провайдер; stub — код пишется в лог и звонок не делается (только для теста!)
+     provider: ${SURVEY_FLASHCALL_PROVIDER:zvonok}
+--- /dev/null
++++ b/deploy/nginx/survey-edge-ratelimit.conf
+@@ -0,0 +1,29 @@
++# Лимит заказа звонка на КРАЕВОМ nginx, когда схема такая: интернет → nginx → IIS → Tomcat.
++# Только здесь виден настоящий адрес посетителя ($binary_remote_addr), поэтому лимит ставим именно на этом узле.
++# IIS и Tomcat после nginx видят адрес nginx, считать лимит по ним нельзя.
++#
++# 1) zone — в http{} (например, в /etc/nginx/conf.d/survey-ratelimit.conf, вне server{}):
++limit_req_zone $binary_remote_addr zone=survey_pub:10m  rate=10r/s;   # публичный API анкеты
++# Заказ звонка стоит денег: отдельный, более строгий предел. Посетители за одним адресом (общий Wi-Fi площадки,
++# мобильный NAT) делят его: подберите rate/burst под ожидаемое число людей на площадке одновременно.
++limit_req_zone $binary_remote_addr zone=survey_call:10m rate=30r/m;
++
++# 2) locations — в server{} вашего домена (1cbig.bigcom.ru), ПЕРЕД общим location, который проксирует /survey/ на IIS.
++#    proxy_pass и proxy_set_header скопируйте из вашего существующего location для /survey/ (здесь UPSTREAM_IIS —
++#    то, что у вас там указано). Заголовки Host и X-Forwarded-* должны остаться теми же.
++#
++#    location ^~ /survey/api/v1/public/ {
++#        limit_req zone=survey_pub burst=30 nodelay;
++#        limit_req_status 429;
++#        proxy_pass UPSTREAM_IIS;
++#        # ... те же proxy_set_header / proxy_http_version / proxy_read_timeout, что в location для /survey/ ...
++#
++#        # Заказ flash-call: действуют оба предела; заголовки наследуются от внешнего location
++#        location ~ ^/survey/api/v1/public/events/[^/]+/phone/call$ {
++#            limit_req zone=survey_pub burst=30 nodelay;
++#            limit_req zone=survey_call burst=20 nodelay;
++#            proxy_pass UPSTREAM_IIS;
++#        }
++#    }
++#
++#    Если proxy_pass у вас с URI (например, http://iis/survey/), в вложенном location он должен быть записан так же.
+--- /dev/null
++++ b/src/main/java/ru/big/survey/api/DeviceCookie.java
+@@ -0,0 +1,45 @@
++package ru.big.survey.api;
++
++import jakarta.servlet.http.Cookie;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import java.time.Duration;
++import org.springframework.http.HttpHeaders;
++import org.springframework.http.ResponseCookie;
++
++/**
++ * Cookie устройства посетителя (SURVEYDEV): случайный секрет, по которому сервер узнаёт браузер, где телефон уже
++ * подтверждали кодом. Путь ограничен публичным API анкеты; JS значение не видит (HttpOnly).
++ */
++final class DeviceCookie {
++
++    static final String NAME = "SURVEYDEV";
++
++    private DeviceCookie() {
++    }
++
++    /** Значение cookie или null. Проверка формата — в {@code DeviceSecrets.isWellFormed}. */
++    static String read(HttpServletRequest request) {
++        Cookie[] cookies = request.getCookies();
++        if (cookies == null) {
++            return null;
++        }
++        for (Cookie c : cookies) {
++            if (NAME.equals(c.getName())) {
++                return c.getValue();
++            }
++        }
++        return null;
++    }
++
++    static void write(HttpServletRequest request, HttpServletResponse response, String secret, Duration maxAge) {
++        ResponseCookie cookie = ResponseCookie.from(NAME, secret)
++                .httpOnly(true)
++                .secure(request.isSecure())   // за nginx со схемой https — через forward-headers (X-Forwarded-Proto)
++                .sameSite("Lax")
++                .path(request.getContextPath() + "/api/v1/public")
++                .maxAge(maxAge)
++                .build();
++        response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
++    }
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/domain/CallBudget.java
+@@ -0,0 +1,31 @@
++package ru.big.survey.domain;
++
++import jakarta.persistence.Column;
++import jakarta.persistence.Entity;
++import jakarta.persistence.Id;
++import jakarta.persistence.Table;
++import java.time.LocalDate;
++
++/** Сколько flash-call заказано за сутки по всему сервису. Увеличивается только через {@code CallBudgetRepository#increment}. */
++@Entity
++@Table(name = "call_budget")
++public class CallBudget {
++
++    @Id
++    @Column(name = "budget_day")
++    private LocalDate budgetDay;
++
++    @Column(nullable = false)
++    private int calls;
++
++    protected CallBudget() {
++    }
++
++    public CallBudget(LocalDate budgetDay, int calls) {
++        this.budgetDay = budgetDay;
++        this.calls = calls;
++    }
++
++    public LocalDate getBudgetDay() { return budgetDay; }
++    public int getCalls() { return calls; }
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/domain/PhoneDevice.java
+@@ -0,0 +1,65 @@
++package ru.big.survey.domain;
++
++import jakarta.persistence.Column;
++import jakarta.persistence.Entity;
++import jakarta.persistence.Id;
++import jakarta.persistence.IdClass;
++import jakarta.persistence.Table;
++import java.io.Serializable;
++import java.time.Instant;
++import java.util.Objects;
++
++/**
++ * Устройство (браузер), на котором телефон подтверждён кодом flash-call. Секрет живёт только в cookie
++ * посетителя, в БД хранится его SHA-256. Записи создаёт и продлевает {@code PhoneDeviceRepository#upsert}.
++ */
++@Entity
++@Table(name = "phone_device")
++@IdClass(PhoneDevice.Key.class)
++public class PhoneDevice {
++
++    @Id
++    @Column(length = 20)
++    private String phone;
++
++    @Id
++    @Column(name = "device_hash", length = 64)
++    private String deviceHash;
++
++    @Column(name = "created_at", nullable = false)
++    private Instant createdAt;
++
++    @Column(name = "expires_at", nullable = false)
++    private Instant expiresAt;
++
++    protected PhoneDevice() {
++    }
++
++    public String getPhone() { return phone; }
++    public String getDeviceHash() { return deviceHash; }
++    public Instant getCreatedAt() { return createdAt; }
++    public Instant getExpiresAt() { return expiresAt; }
++
++    public static class Key implements Serializable {
++        private String phone;
++        private String deviceHash;
++
++        public Key() {
++        }
++
++        public Key(String phone, String deviceHash) {
++            this.phone = phone;
++            this.deviceHash = deviceHash;
++        }
++
++        @Override
++        public boolean equals(Object o) {
++            return o instanceof Key k && Objects.equals(phone, k.phone) && Objects.equals(deviceHash, k.deviceHash);
++        }
++
++        @Override
++        public int hashCode() {
++            return Objects.hash(phone, deviceHash);
++        }
++    }
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/persistence/CallBudgetRepository.java
+@@ -0,0 +1,23 @@
++package ru.big.survey.persistence;
++
++import java.time.LocalDate;
++import org.springframework.data.jpa.repository.JpaRepository;
++import org.springframework.data.jpa.repository.Modifying;
++import org.springframework.data.jpa.repository.Query;
++import org.springframework.data.repository.query.Param;
++import ru.big.survey.domain.CallBudget;
++
++public interface CallBudgetRepository extends JpaRepository<CallBudget, LocalDate> {
++
++    /** Атомарно +1 за сутки (создаёт строку при первом звонке дня). */
++    @Modifying
++    @Query(value = """
++            insert into call_budget (budget_day, calls) values (:day, 1)
++            on conflict (budget_day) do update set calls = call_budget.calls + 1
++            """, nativeQuery = true)
++    int increment(@Param("day") LocalDate day);
++
++    @Modifying
++    @Query("delete from CallBudget b where b.budgetDay < :before")
++    int deleteBefore(@Param("before") LocalDate before);
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/persistence/PhoneDeviceRepository.java
+@@ -0,0 +1,28 @@
++package ru.big.survey.persistence;
++
++import java.time.Instant;
++import org.springframework.data.jpa.repository.JpaRepository;
++import org.springframework.data.jpa.repository.Modifying;
++import org.springframework.data.jpa.repository.Query;
++import org.springframework.data.repository.query.Param;
++import ru.big.survey.domain.PhoneDevice;
++
++public interface PhoneDeviceRepository extends JpaRepository<PhoneDevice, PhoneDevice.Key> {
++
++    /** Подтверждён ли телефон на этом устройстве к моменту {@code now}. */
++    boolean existsByPhoneAndDeviceHashAndExpiresAtAfter(String phone, String deviceHash, Instant now);
++
++    /** Регистрация устройства; при повторной проверке на том же устройстве срок продлевается. */
++    @Modifying
++    @Query(value = """
++            insert into phone_device (phone, device_hash, created_at, expires_at)
++            values (:phone, :deviceHash, :now, :expiresAt)
++            on conflict (phone, device_hash) do update set expires_at = excluded.expires_at
++            """, nativeQuery = true)
++    int upsert(@Param("phone") String phone, @Param("deviceHash") String deviceHash,
++               @Param("now") Instant now, @Param("expiresAt") Instant expiresAt);
++
++    @Modifying
++    @Query("delete from PhoneDevice d where d.expiresAt < :before")
++    int deleteExpired(@Param("before") Instant before);
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/persistence/UserSessionState.java
+@@ -0,0 +1,9 @@
++package ru.big.survey.persistence;
++
++/** Минимум о пользователе для проверки живой сессии: без загрузки ролей и назначений. */
++public interface UserSessionState {
++
++    boolean isActive();
++
++    int getAuthVersion();
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/security/SessionRevalidationFilter.java
+@@ -0,0 +1,47 @@
++package ru.big.survey.security;
++
++import jakarta.servlet.Filter;
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletException;
++import jakarta.servlet.ServletRequest;
++import jakarta.servlet.ServletResponse;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpSession;
++import java.io.IOException;
++import org.springframework.security.authentication.AnonymousAuthenticationToken;
++import org.springframework.security.core.Authentication;
++import org.springframework.security.core.context.SecurityContextHolder;
++
++/**
++ * Перед авторизацией запроса сверяет вошедшего пользователя с БД ({@link SessionValidator}). Если пользователь отключён
++ * или его пароль/роли менялись после входа, сессия закрывается, и запрос дальше идёт как анонимный (401 на закрытых путях).
++ */
++public class SessionRevalidationFilter implements Filter {
++
++    /** Атрибут сессии: версия учётных данных пользователя на момент входа. */
++    public static final String VERSION_ATTRIBUTE = "survey.authVersion";
++
++    private final SessionValidator validator;
++
++    public SessionRevalidationFilter(SessionValidator validator) {
++        this.validator = validator;
++    }
++
++    @Override
++    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) throws IOException, ServletException {
++        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
++        if (authentication != null && authentication.isAuthenticated()
++                && !(authentication instanceof AnonymousAuthenticationToken)
++                && request instanceof HttpServletRequest http) {
++            HttpSession session = http.getSession(false);
++            Object stamp = session == null ? null : session.getAttribute(VERSION_ATTRIBUTE);
++            if (!validator.isValid(authentication.getName(), stamp instanceof Integer version ? version : null)) {
++                SecurityContextHolder.clearContext();
++                if (session != null) {
++                    session.invalidate();
++                }
++            }
++        }
++        chain.doFilter(request, response);
++    }
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/security/SessionValidator.java
+@@ -0,0 +1,35 @@
++package ru.big.survey.security;
++
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++import ru.big.survey.domain.AppUser;
++import ru.big.survey.persistence.AppUserRepository;
++
++/**
++ * Проверяет, что сессия персонала всё ещё действительна: пользователь существует, активен, а версия его учётных
++ * данных не менялась с момента входа. Так отключение, смена пароля или ролей действуют сразу, а не через 12 часов.
++ */
++@Service
++public class SessionValidator {
++
++    private final AppUserRepository users;
++
++    public SessionValidator(AppUserRepository users) {
++        this.users = users;
++    }
++
++    /**
++     * @param username    имя из сессии
++     * @param sessionStamp версия учётных данных, запомненная при входе; null — сессия без отметки (создана до этого
++     *                     изменения), её закрываем
++     */
++    @Transactional(readOnly = true)
++    public boolean isValid(String username, Integer sessionStamp) {
++        if (username == null || sessionStamp == null) {
++            return false;
++        }
++        return users.findStateByUsername(AppUser.normalizeUsername(username))
++                .map(state -> state.isActive() && state.getAuthVersion() == sessionStamp)
++                .orElse(false);
++    }
++}
+--- /dev/null
++++ b/src/main/java/ru/big/survey/service/DeviceSecrets.java
+@@ -0,0 +1,42 @@
++package ru.big.survey.service;
++
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.security.SecureRandom;
++import java.util.Base64;
++import java.util.HexFormat;
++import java.util.regex.Pattern;
++
++/**
++ * Секрет устройства посетителя: 32 случайных байта в base64url (43 символа). Хранится в cookie браузера,
++ * в БД попадает только SHA-256 (hex), поэтому утечка таблицы не позволяет подделать cookie.
++ */
++public final class DeviceSecrets {
++
++    private static final SecureRandom RANDOM = new SecureRandom();
++    private static final Pattern WELL_FORMED = Pattern.compile("[A-Za-z0-9_-]{43}");
++
++    private DeviceSecrets() {
++    }
++
++    public static String generate() {
++        byte[] bytes = new byte[32];
++        RANDOM.nextBytes(bytes);
++        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
++    }
++
++    /** Значение cookie, пришедшее от клиента, ему не доверяем: годится только строка ожидаемого вида. */
++    public static boolean isWellFormed(String secret) {
++        return secret != null && WELL_FORMED.matcher(secret).matches();
++    }
++
++    public static String hash(String secret) {
++        try {
++            MessageDigest digest = MessageDigest.getInstance("SHA-256");
++            return HexFormat.of().formatHex(digest.digest(secret.getBytes(StandardCharsets.UTF_8)));
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException(e);
++        }
++    }
++}
+--- /dev/null
++++ b/src/main/resources/db/migration/V10__phone_device.sql
+@@ -0,0 +1,11 @@
++-- Браузеры (устройства), на которых телефон уже подтверждён кодом flash-call.
++-- В cookie у посетителя лежит случайный секрет, здесь — только его SHA-256 (hex).
++-- Повторный заход без звонка разрешается только для пары (телефон, устройство).
++create table phone_device (
++    phone       varchar(20) not null,
++    device_hash varchar(64) not null,
++    created_at  timestamptz not null,
++    expires_at  timestamptz not null,
++    primary key (phone, device_hash)
++);
++create index ix_phone_device_expires on phone_device (expires_at);
+--- /dev/null
++++ b/src/main/resources/db/migration/V11__call_budget.sql
+@@ -0,0 +1,5 @@
++-- Общий суточный счётчик заказанных flash-call (для ограничения расходов, см. survey.verification.max-calls-per-day).
++create table call_budget (
++    budget_day date    primary key,
++    calls      integer not null
++);
+--- /dev/null
++++ b/src/main/resources/db/migration/V12__app_user_auth_version.sql
+@@ -0,0 +1,3 @@
++-- Версия учётных данных пользователя: растёт при смене пароля, ролей и признака «активен».
++-- Сессия запоминает версию при входе; если она не совпала с БД, сессия закрывается (см. SessionRevalidationFilter).
++alter table app_user add column auth_version integer not null default 0;
+--- /dev/null
++++ b/src/test/java/ru/big/survey/domain/AppUserAuthVersionTest.java
+@@ -0,0 +1,64 @@
++package ru.big.survey.domain;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.time.Instant;
++import java.util.Set;
++import java.util.UUID;
++import org.junit.jupiter.api.Test;
++
++/** Версия учётных данных растёт ровно тогда, когда старые сессии должны закрываться. */
++class AppUserAuthVersionTest {
++
++    private static final Instant NOW = Instant.parse("2026-10-21T10:00:00Z");
++
++    private AppUser staff() {
++        return AppUser.create("ivan", "Иван", "hash-1", Set.of(Role.STAFF), NOW);
++    }
++
++    @Test
++    void password_change_bumps_the_version() {
++        AppUser user = staff();
++        int before = user.getAuthVersion();
++
++        user.apply(user.getUsername(), user.getDisplayName(), "hash-2", user.getRoles(), NOW);
++
++        assertThat(user.getAuthVersion()).isEqualTo(before + 1);
++    }
++
++    @Test
++    void role_change_bumps_the_version() {
++        AppUser user = staff();
++        int before = user.getAuthVersion();
++
++        user.apply(user.getUsername(), user.getDisplayName(), null, Set.of(Role.STAFF, Role.ADMIN), NOW);
++
++        assertThat(user.getAuthVersion()).isEqualTo(before + 1);
++    }
++
++    @Test
++    void harmless_edits_keep_the_version() {
++        AppUser user = staff();
++        int before = user.getAuthVersion();
++
++        user.apply(user.getUsername(), "Иван Петров", null, Set.of(Role.STAFF), NOW);   // имя, тот же состав ролей
++        user.setEvents(Set.of(UUID.randomUUID()), NOW);
++        user.setBlockRejectedMarks(false, NOW);
++        user.setActive(true, NOW);                                                      // уже активен
++
++        assertThat(user.getAuthVersion()).isEqualTo(before);
++    }
++
++    @Test
++    void deactivation_and_reactivation_both_bump_so_old_sessions_do_not_revive() {
++        AppUser user = staff();
++        int before = user.getAuthVersion();
++
++        user.setActive(false, NOW);
++        int afterOff = user.getAuthVersion();
++        user.setActive(true, NOW);
++
++        assertThat(afterOff).isEqualTo(before + 1);
++        assertThat(user.getAuthVersion()).isEqualTo(before + 2);
++    }
++}
+--- /dev/null
++++ b/src/test/java/ru/big/survey/security/SessionRevalidationFilterTest.java
+@@ -0,0 +1,137 @@
++package ru.big.survey.security;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletRequest;
++import jakarta.servlet.ServletResponse;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpSession;
++import java.lang.reflect.Proxy;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.security.authentication.AnonymousAuthenticationToken;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.security.core.authority.AuthorityUtils;
++import org.springframework.security.core.context.SecurityContextHolder;
++import ru.big.survey.persistence.AppUserRepository;
++import ru.big.survey.persistence.UserSessionState;
++
++/** Закрывает ли фильтр сессию отключённого или изменённого пользователя и пропускает ли остальных. */
++class SessionRevalidationFilterTest {
++
++    private record State(boolean active, int version) implements UserSessionState {
++        @Override public boolean isActive() { return active; }
++        @Override public int getAuthVersion() { return version; }
++    }
++
++    private final Map<String, State> users = new HashMap<>();
++    private final Map<String, Object> sessionAttributes = new HashMap<>();
++    private final AtomicInteger invalidated = new AtomicInteger();
++    private final AtomicInteger chained = new AtomicInteger();
++    private final SessionRevalidationFilter filter = new SessionRevalidationFilter(new SessionValidator(repository()));
++
++    @Test
++    void valid_session_is_kept() throws Exception {
++        users.put("ivan", new State(true, 2));
++        sessionAttributes.put(SessionRevalidationFilter.VERSION_ATTRIBUTE, 2);
++
++        run(signedIn("ivan"), true);
++
++        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNotNull();
++        assertThat(invalidated.get()).isEqualTo(0);
++        assertThat(chained.get()).isEqualTo(1);
++    }
++
++    @Test
++    void deactivated_admin_loses_the_session_immediately() throws Exception {
++        users.put("admin", new State(false, 2));
++        sessionAttributes.put(SessionRevalidationFilter.VERSION_ATTRIBUTE, 2);
++
++        run(signedIn("admin"), true);
++
++        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
++        assertThat(invalidated.get()).isEqualTo(1);
++        assertThat(chained.get()).isEqualTo(1);   // запрос идёт дальше как анонимный, 401 вернёт авторизация
++    }
++
++    @Test
++    void password_change_closes_other_sessions() throws Exception {
++        users.put("ivan", new State(true, 3));   // версия выросла после смены пароля
++        sessionAttributes.put(SessionRevalidationFilter.VERSION_ATTRIBUTE, 2);
++
++        run(signedIn("ivan"), true);
++
++        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
++        assertThat(invalidated.get()).isEqualTo(1);
++    }
++
++    @Test
++    void session_without_stamp_is_closed() throws Exception {
++        users.put("ivan", new State(true, 2));
++
++        run(signedIn("ivan"), true);
++
++        assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
++        assertThat(invalidated.get()).isEqualTo(1);
++    }
++
++    @Test
++    void anonymous_requests_are_not_checked() throws Exception {
++        run(null, false);
++        run(new AnonymousAuthenticationToken("key", "anonymousUser", AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS")), false);
++
++        assertThat(invalidated.get()).isEqualTo(0);
++        assertThat(chained.get()).isEqualTo(2);
++    }
++
++    @AfterEach
++    void clearSecurityContext() {
++        SecurityContextHolder.clearContext();
++    }
++
++    // ---------- помощники ----------
++
++    private UsernamePasswordAuthenticationToken signedIn(String username) {
++        return UsernamePasswordAuthenticationToken.authenticated(username, null, AuthorityUtils.createAuthorityList("ROLE_ADMIN"));
++    }
++
++    private void run(org.springframework.security.core.Authentication authentication, boolean hasSession) throws Exception {
++        SecurityContextHolder.clearContext();
++        if (authentication != null) {
++            SecurityContextHolder.getContext().setAuthentication(authentication);
++        }
++        HttpSession session = (HttpSession) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{HttpSession.class},
++                (self, method, args) -> switch (method.getName()) {
++                    case "getAttribute" -> sessionAttributes.get((String) args[0]);
++                    case "invalidate" -> {
++                        invalidated.incrementAndGet();
++                        yield null;
++                    }
++                    default -> throw new UnsupportedOperationException(method.getName());
++                });
++        HttpServletRequest request = (HttpServletRequest) Proxy.newProxyInstance(getClass().getClassLoader(),
++                new Class<?>[]{HttpServletRequest.class}, (self, method, args) -> {
++                    if (method.getName().equals("getSession")) {
++                        return hasSession ? session : null;
++                    }
++                    throw new UnsupportedOperationException(method.getName());
++                });
++        FilterChain chain = (ServletRequest req, ServletResponse res) -> chained.incrementAndGet();
++        filter.doFilter(request, null, chain);
++    }
++
++    private AppUserRepository repository() {
++        return (AppUserRepository) Proxy.newProxyInstance(AppUserRepository.class.getClassLoader(),
++                new Class<?>[]{AppUserRepository.class}, (self, method, args) -> {
++                    if (method.getName().equals("findStateByUsername")) {
++                        return Optional.ofNullable(users.get((String) args[0]));
++                    }
++                    throw new UnsupportedOperationException(method.getName());
++                });
++    }
++}
+--- /dev/null
++++ b/src/test/java/ru/big/survey/security/SessionValidatorTest.java
+@@ -0,0 +1,69 @@
++package ru.big.survey.security;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.lang.reflect.Proxy;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Optional;
++import org.junit.jupiter.api.Test;
++import ru.big.survey.persistence.AppUserRepository;
++import ru.big.survey.persistence.UserSessionState;
++
++class SessionValidatorTest {
++
++    private record State(boolean active, int version) implements UserSessionState {
++        @Override public boolean isActive() { return active; }
++        @Override public int getAuthVersion() { return version; }
++    }
++
++    private final Map<String, State> store = new HashMap<>();
++    private final SessionValidator validator = new SessionValidator(repository());
++
++    @Test
++    void active_user_with_matching_version_is_valid() {
++        store.put("ivan", new State(true, 3));
++
++        assertThat(validator.isValid("ivan", 3)).isTrue();
++    }
++
++    @Test
++    void username_is_matched_case_insensitively_like_at_login() {
++        store.put("ivan", new State(true, 3));
++
++        assertThat(validator.isValid("  Ivan ", 3)).isTrue();
++    }
++
++    @Test
++    void deactivated_user_is_not_valid() {
++        store.put("ivan", new State(false, 3));
++
++        assertThat(validator.isValid("ivan", 3)).isFalse();
++    }
++
++    @Test
++    void changed_version_invalidates_the_old_session() {
++        store.put("ivan", new State(true, 4));   // пароль или роли менялись после входа
++
++        assertThat(validator.isValid("ivan", 3)).isFalse();
++    }
++
++    @Test
++    void deleted_user_or_session_without_stamp_is_not_valid() {
++        store.put("ivan", new State(true, 3));
++
++        assertThat(validator.isValid("petr", 3)).isFalse();      // пользователя нет
++        assertThat(validator.isValid("ivan", null)).isFalse();   // сессия создана до введения версии
++        assertThat(validator.isValid(null, 3)).isFalse();
++    }
++
++    private AppUserRepository repository() {
++        return (AppUserRepository) Proxy.newProxyInstance(AppUserRepository.class.getClassLoader(),
++                new Class<?>[]{AppUserRepository.class}, (self, method, args) -> {
++                    if (method.getName().equals("findStateByUsername")) {
++                        return Optional.ofNullable(store.get((String) args[0]));
++                    }
++                    throw new UnsupportedOperationException(method.getName());
++                });
++    }
++}
+--- /dev/null
++++ b/src/test/java/ru/big/survey/service/DeviceSecretsTest.java
+@@ -0,0 +1,37 @@
++package ru.big.survey.service;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.Test;
++
++class DeviceSecretsTest {
++
++    @Test
++    void generated_secret_is_well_formed_and_unique() {
++        String a = DeviceSecrets.generate();
++        String b = DeviceSecrets.generate();
++        assertThat(DeviceSecrets.isWellFormed(a)).isTrue();
++        assertThat(a).hasSize(43);
++        assertThat(a).isNotEqualTo(b);
++    }
++
++    @Test
++    void hash_is_stable_sha256_hex() {
++        String secret = DeviceSecrets.generate();
++        assertThat(DeviceSecrets.hash(secret)).hasSize(64);
++        assertThat(DeviceSecrets.hash(secret)).isEqualTo(DeviceSecrets.hash(secret));
++        assertThat(DeviceSecrets.hash(secret)).isNotEqualTo(DeviceSecrets.hash(DeviceSecrets.generate()));
++        // SHA-256("abc")
++        assertThat(DeviceSecrets.hash("abc")).isEqualTo("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
++    }
++
++    @Test
++    void foreign_values_are_not_trusted() {
++        assertThat(DeviceSecrets.isWellFormed(null)).isFalse();
++        assertThat(DeviceSecrets.isWellFormed("")).isFalse();
++        assertThat(DeviceSecrets.isWellFormed("abc")).isFalse();
++        assertThat(DeviceSecrets.isWellFormed("a".repeat(44))).isFalse();
++        assertThat(DeviceSecrets.isWellFormed("a".repeat(42) + "=")).isFalse();
++        assertThat(DeviceSecrets.isWellFormed("a".repeat(42) + ";")).isFalse();
++    }
++}
+--- /dev/null
++++ b/src/test/java/ru/big/survey/service/PhoneVerificationServiceTest.java
+@@ -0,0 +1,542 @@
++package ru.big.survey.service;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Proxy;
++import java.time.Clock;
++import java.time.Duration;
++import java.time.Instant;
++import java.time.ZoneId;
++import java.time.ZoneOffset;
++import java.time.LocalDate;
++import java.util.HashMap;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.locks.ReentrantLock;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.Callable;
++import java.util.concurrent.Future;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.aop.framework.ProxyFactory;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.TransactionDefinition;
++import org.springframework.transaction.TransactionStatus;
++import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
++import org.springframework.transaction.interceptor.TransactionInterceptor;
++import org.springframework.transaction.support.SimpleTransactionStatus;
++import ru.big.survey.config.SurveyProperties;
++import ru.big.survey.domain.CallBudget;
++import ru.big.survey.domain.PhoneVerification;
++import ru.big.survey.persistence.CallBudgetRepository;
++import ru.big.survey.persistence.PhoneDeviceRepository;
++import ru.big.survey.persistence.PhoneVerificationRepository;
++
++/** Повторная проверка телефона: токен без звонка получает только устройство, на котором вводили код. */
++class PhoneVerificationServiceTest {
++
++    private static final String PHONE = "79161234567";
++    private static final String OTHER_PHONE = "79167654321";
++
++    private final AtomicReference<Instant> now = new AtomicReference<>(Instant.parse("2026-10-21T10:00:00Z"));
++    private final AtomicInteger calls = new AtomicInteger();
++    private final Map<String, PhoneVerification> verificationStore = new ConcurrentHashMap<>();
++    private final Map<LocalDate, Integer> budgetStore = new ConcurrentHashMap<>();
++    private final Map<String, ReentrantLock> rowLocks = new ConcurrentHashMap<>();
++    private final ThreadLocal<List<ReentrantLock>> heldLocks = ThreadLocal.withInitial(ArrayList::new);
++    private final ThreadLocal<Boolean> inTransaction = ThreadLocal.withInitial(() -> false);
++    private volatile RuntimeException flashFailure;
++    private volatile long flashDelayMs;
++    private final Map<String, Instant> deviceStore = new HashMap<>();   // "phone|hash" -> expiresAt
++
++    private SurveyProperties props;
++    private PhoneVerificationService service;
++    private TokenService tokens;
++
++    @BeforeEach
++    void setUp() {
++        Clock clock = new Clock() {
++            @Override public ZoneId getZone() { return ZoneOffset.UTC; }
++            @Override public Clock withZone(ZoneId zone) { return this; }
++            @Override public Instant instant() { return now.get(); }
++        };
++        props = new SurveyProperties();
++        props.getSecurity().setTokenSecret("0123456789abcdef0123456789abcdef");
++        props.getSecurity().setVerificationTokenValid(Duration.ofMinutes(30));
++        tokens = new TokenService(props, clock);
++        tokens.init();
++        FlashCallClient flash = phone -> {
++            if (flashFailure != null) {
++                throw flashFailure;
++            }
++            if (flashDelayMs > 0) {
++                sleep(flashDelayMs);   // обращение к провайдеру занимает время: окно для гонки
++            }
++            calls.incrementAndGet();
++            return "1234";
++        };
++        service = new PhoneVerificationService(verifications(), devices(), budgets(), flash, tokens, props, clock);
++    }
++
++    // ---------- сценарии ----------
++
++    @Test
++    void code_confirmation_registers_device_and_issues_new_secret() {
++        PhoneVerificationService.VerifyResult r = confirm(PHONE);
++
++        assertThat(r.token()).isNotNull();
++        assertThat(tokens.parseVerification(r.token()).get().phone()).isEqualTo(PHONE);
++        assertThat(DeviceSecrets.isWellFormed(r.deviceSecret())).isTrue();
++        // в БД только хеш секрета, сам секрет не хранится
++        assertThat(deviceStore).containsOnlyKeys(PHONE + "|" + DeviceSecrets.hash(r.deviceSecret()));
++        assertThat(deviceStore.keySet().iterator().next()).doesNotContain(r.deviceSecret());
++    }
++
++    @Test
++    void known_device_gets_token_without_a_call() {
++        String secret = confirm(PHONE).deviceSecret();
++        int before = calls.get();
++
++        PhoneVerificationService.CallResult r = service.call(PHONE, secret);
++
++        assertThat(r.status()).isEqualTo("already_verified");
++        assertThat(tokens.parseVerification(r.token()).get().phone()).isEqualTo(PHONE);
++        assertThat(calls.get()).isEqualTo(before);
++    }
++
++    @Test
++    void knowing_the_number_is_not_enough() {
++        confirm(PHONE);
++        int before = calls.get();
++
++        PhoneVerificationService.CallResult r = service.call(PHONE, null);
++
++        assertThat(r.status()).isEqualTo("called");
++        assertThat(r.token()).isNull();
++        assertThat(calls.get()).isEqualTo(before + 1);
++    }
++
++    @Test
++    void unknown_or_malformed_cookie_does_not_skip_the_call() {
++        confirm(PHONE);
++        int before = calls.get();
++
++        assertThat(service.call(PHONE, DeviceSecrets.generate()).status()).isEqualTo("called");   // чужой секрет
++        now.set(now.get().plusSeconds(120));
++        assertThat(service.call(PHONE, "abc").status()).isEqualTo("called");                      // мусор в cookie
++        assertThat(calls.get()).isEqualTo(before + 2);
++    }
++
++    @Test
++    void secret_of_one_phone_does_not_open_another() {
++        String secret = confirm(PHONE).deviceSecret();
++
++        PhoneVerificationService.CallResult r = service.call(OTHER_PHONE, secret);
++
++        assertThat(r.status()).isEqualTo("called");
++        assertThat(r.token()).isNull();
++    }
++
++    @Test
++    void device_expires_with_verified_valid_period() {
++        String secret = confirm(PHONE).deviceSecret();
++
++        now.set(now.get().plus(Duration.ofHours(23)));
++        assertThat(service.call(PHONE, secret).status()).isEqualTo("already_verified");
++
++        now.set(now.get().plus(Duration.ofHours(2)));   // прошло 25 часов
++        assertThat(service.call(PHONE, secret).status()).isEqualTo("called");
++    }
++
++    @Test
++    void verified_phone_cannot_get_token_without_a_fresh_code() {
++        confirm(PHONE);
++
++        // раньше повторный verify по уже подтверждённому номеру выдавал токен при любом коде
++        assertThatThrownBy(() -> service.verify(PHONE, "0000"))
++                .isInstanceOf(ApiException.class)
++                .extracting(e -> ((ApiException) e).getCode()).isEqualTo("expired");
++    }
++
++    @Test
++    void wrong_code_registers_no_device() {
++        service.call(PHONE, null);
++
++        assertThatThrownBy(() -> service.verify(PHONE, "9999"))
++                .isInstanceOf(ApiException.class)
++                .extracting(e -> ((ApiException) e).getCode()).isEqualTo("wrong_code");
++        assertThat(deviceStore).isEmpty();
++    }
++
++    @Test
++    void foreign_call_does_not_revoke_the_confirmed_device() {
++        String secret = confirm(PHONE).deviceSecret();
++
++        now.set(now.get().plusSeconds(120));
++        service.call(PHONE, null);   // посторонний заказывает звонок на чужой номер: сбрасывает состояние кода
++
++        assertThat(service.call(PHONE, secret).status()).isEqualTo("already_verified");
++    }
++
++    @Test
++    void every_confirmation_issues_a_fresh_secret() {
++        String first = confirm(PHONE).deviceSecret();
++        now.set(now.get().plusSeconds(120));
++        String second = confirm(PHONE).deviceSecret();
++
++        assertThat(second).isNotEqualTo(first);
++    }
++
++    @Test
++    void purge_removes_only_expired_devices() {
++        String secret = confirm(PHONE).deviceSecret();
++
++        service.purgeExpired();
++        assertThat(deviceStore).hasSize(1);
++
++        now.set(now.get().plus(Duration.ofHours(25)));
++        service.purgeExpired();
++        assertThat(deviceStore).isEmpty();
++        assertThat(service.call(PHONE, secret).status()).isEqualTo("called");
++    }
++
++    // ---------- лимит попыток ----------
++
++    @Test
++    void failed_attempt_is_committed_not_rolled_back_with_the_exception() {
++        // Неверный код — это ApiException (RuntimeException): без noRollbackFor Spring откатывает транзакцию
++        // вместе с увеличенным счётчиком, и лимит попыток не работает. Проверяем на настоящем перехватчике Spring.
++        service.call(PHONE, null);
++        RecordingTxManager tx = new RecordingTxManager();
++        PhoneVerificationService proxied = transactional(tx);
++
++        assertThatThrownBy(() -> proxied.verify(PHONE, "9999")).isInstanceOf(ApiException.class);
++
++        assertThat(tx.rollbacks).isEqualTo(0);
++        assertThat(tx.commits).isEqualTo(1);
++    }
++
++    @Test
++    void attempts_are_limited_and_exhausted_code_is_dead() {
++        service.call(PHONE, null);
++
++        for (int left = 4; left >= 1; left--) {
++            assertThat(failure(() -> service.verify(PHONE, "0000"))).isEqualTo("wrong_code");
++        }
++        assertThat(failure(() -> service.verify(PHONE, "0000"))).isEqualTo("too_many");   // пятая неудачная
++        assertThat(failure(() -> service.verify(PHONE, "0001"))).isEqualTo("too_many");   // шестая даже не проверяется
++        // верный код после исчерпания попыток токен не даёт
++        assertThat(failure(() -> service.verify(PHONE, "1234"))).isEqualTo("too_many");
++        assertThat(deviceStore).isEmpty();
++    }
++
++    @Test
++    void new_call_resets_attempts() {
++        service.call(PHONE, null);
++        for (int i = 0; i < 5; i++) {
++            failure(() -> service.verify(PHONE, "0000"));
++        }
++        now.set(now.get().plusSeconds(120));
++
++        service.call(PHONE, null);
++
++        assertThat(service.verify(PHONE, "1234").token()).isNotNull();
++    }
++
++    @Test
++    void parallel_guesses_cannot_exceed_the_attempt_limit() throws Exception {
++        service.call(PHONE, null);
++        int threads = 40;
++        ExecutorService pool = Executors.newFixedThreadPool(threads);
++        CountDownLatch start = new CountDownLatch(1);
++        List<Future<Boolean>> results = new ArrayList<>();
++        for (int i = 0; i < threads; i++) {
++            Callable<Boolean> task = () -> {
++                start.await();
++                try {
++                    service.verify(PHONE, "0000");
++                    return true;
++                } catch (ApiException e) {
++                    // true — попытка реально проверена (код сравнивался); false — отсечена до проверки
++                    return !e.getMessage().startsWith("Превышено");
++                }
++            };
++            results.add(pool.submit(task));
++        }
++        start.countDown();
++        int checked = 0;
++        for (Future<Boolean> f : results) {
++            if (f.get(10, TimeUnit.SECONDS)) {
++                checked++;
++            }
++        }
++        pool.shutdownNow();
++
++        assertThat(checked).isEqualTo(5);   // ровно столько, сколько разрешено, а не по числу параллельных запросов
++        assertThat(failure(() -> service.verify(PHONE, "1234"))).isEqualTo("too_many");
++    }
++
++    // ---------- лимиты звонков ----------
++
++    @Test
++    void daily_limit_per_phone_is_enforced() {
++        for (int i = 0; i < 8; i++) {
++            service.call(PHONE, null);
++            now.set(now.get().plusSeconds(61));   // окно повтора прошло
++        }
++        assertThat(calls.get()).isEqualTo(8);
++
++        assertThat(failure(() -> service.call(PHONE, null))).isEqualTo("too_many");
++        assertThat(calls.get()).isEqualTo(8);
++    }
++
++    @Test
++    void parallel_calls_for_one_phone_order_a_single_flash_call() throws Exception {
++        flashDelayMs = 50;   // пока идёт звонок провайдеру, остальные запросы уже пришли
++        int threads = 20;
++        PhoneVerificationService proxied = transactional(new RecordingTxManager());
++        ExecutorService pool = Executors.newFixedThreadPool(threads);
++        CountDownLatch start = new CountDownLatch(1);
++        List<Future<String>> results = new ArrayList<>();
++        for (int i = 0; i < threads; i++) {
++            Callable<String> task = () -> {
++                start.await();
++                return proxied.call(PHONE, null).status();
++            };
++            results.add(pool.submit(task));
++        }
++        start.countDown();
++        int called = 0;
++        int waiting = 0;
++        for (Future<String> f : results) {
++            String status = f.get(20, TimeUnit.SECONDS);
++            if (status.equals("called")) {
++                called++;
++            } else if (status.equals("wait")) {
++                waiting++;
++            }
++        }
++        pool.shutdownNow();
++
++        assertThat(calls.get()).isEqualTo(1);   // провайдеру ушёл один заказ, а не по числу запросов
++        assertThat(called).isEqualTo(1);
++        assertThat(waiting).isEqualTo(threads - 1);
++    }
++
++    @Test
++    void daily_budget_stops_new_calls_for_all_phones() {
++        props.getVerification().setMaxCallsPerDay(2);
++        service.call("79160000001", null);
++        service.call("79160000002", null);
++        int before = calls.get();
++
++        assertThat(failure(() -> service.call("79160000003", null))).isEqualTo("busy");
++
++        assertThat(calls.get()).isEqualTo(before);   // провайдеру заказ не уходил
++    }
++
++    @Test
++    void daily_budget_does_not_block_a_confirmed_device() {
++        String secret = confirm(PHONE).deviceSecret();
++        props.getVerification().setMaxCallsPerDay(1);   // бюджет уже исчерпан
++
++        assertThat(service.call(PHONE, secret).status()).isEqualTo("already_verified");
++        assertThat(failure(() -> service.call(OTHER_PHONE, null))).isEqualTo("busy");
++    }
++
++    @Test
++    void daily_budget_resets_on_the_next_day() {
++        props.getVerification().setMaxCallsPerDay(1);
++        service.call(PHONE, null);
++        assertThat(failure(() -> service.call(OTHER_PHONE, null))).isEqualTo("busy");
++
++        now.set(now.get().plus(Duration.ofHours(15)));   // уже следующие сутки по Москве
++
++        assertThat(service.call(OTHER_PHONE, null).status()).isEqualTo("called");
++    }
++
++    @Test
++    void failed_provider_call_does_not_consume_the_budget() {
++        flashFailure = ApiException.upstream("Провайдер недоступен");
++
++        assertThat(failure(() -> service.call(PHONE, null))).isEqualTo("upstream");
++
++        assertThat(budgetStore).isEmpty();
++    }
++
++    @Test
++    void purge_removes_old_budget_days() {
++        service.call(PHONE, null);
++        assertThat(budgetStore).hasSize(1);
++
++        now.set(now.get().plus(Duration.ofDays(10)));
++        service.purgeExpired();
++
++        assertThat(budgetStore).isEmpty();
++    }
++
++    // ---------- помощники и фейки репозиториев ----------
++
++    private static void sleep(long millis) {
++        try {
++            Thread.sleep(millis);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++    }
++
++    /** Как COMMIT/ROLLBACK в БД: блокировки строк, взятые транзакцией потока, снимаются. */
++    private void releaseRowLocks() {
++        List<ReentrantLock> held = heldLocks.get();
++        for (ReentrantLock l : held) {
++            l.unlock();
++        }
++        held.clear();
++        inTransaction.set(false);
++    }
++
++    private static String failure(Runnable action) {
++        try {
++            action.run();
++        } catch (ApiException e) {
++            return e.getCode();
++        }
++        return "no_error";
++    }
++
++    private PhoneVerificationService transactional(RecordingTxManager tx) {
++        ProxyFactory factory = new ProxyFactory(service);
++        factory.setProxyTargetClass(true);
++        factory.addAdvice(new TransactionInterceptor(tx, new AnnotationTransactionAttributeSource()));
++        return (PhoneVerificationService) factory.getProxy();
++    }
++
++    private class RecordingTxManager implements PlatformTransactionManager {
++        int commits;
++        int rollbacks;
++
++        @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
++            inTransaction.set(true);
++            return new SimpleTransactionStatus();
++        }
++        @Override public synchronized void commit(TransactionStatus status) {
++            commits++;
++            releaseRowLocks();
++        }
++        @Override public synchronized void rollback(TransactionStatus status) {
++            rollbacks++;
++            releaseRowLocks();
++        }
++    }
++
++    /** Заказ звонка и ввод верного кода (фейковый провайдер всегда возвращает 1234). */
++    private PhoneVerificationService.VerifyResult confirm(String phone) {
++        service.call(phone, null);
++        return service.verify(phone, "1234");
++    }
++
++    private PhoneVerificationRepository verifications() {
++        return proxy(PhoneVerificationRepository.class, (method, args) -> switch (method.getName()) {
++            case "findById" -> Optional.ofNullable(verificationStore.get((String) args[0]));
++            case "insertIfAbsent" -> {
++                boolean created = verificationStore.putIfAbsent((String) args[0], PhoneVerification.create((String) args[0], (Instant) args[1])) == null;
++                yield created ? 1 : 0;
++            }
++            case "findForUpdate" -> {
++                if (inTransaction.get()) {   // SELECT ... FOR UPDATE: строка занята до конца транзакции
++                    ReentrantLock lock = rowLocks.computeIfAbsent((String) args[0], k -> new ReentrantLock());
++                    lock.lock();
++                    heldLocks.get().add(lock);
++                }
++                yield Optional.ofNullable(verificationStore.get((String) args[0]));
++            }
++            case "save" -> {
++                PhoneVerification v = (PhoneVerification) args[0];
++                verificationStore.put(v.getPhone(), v);
++                yield v;
++            }
++            case "claimAttempt" -> {
++                synchronized (verificationStore) {   // как блокировка строки при UPDATE ... WHERE attempts < :max
++                    PhoneVerification v = verificationStore.get((String) args[0]);
++                    Instant at = (Instant) args[1];
++                    int max = (int) args[2];
++                    if (v != null && !v.isVerified() && v.getCodeHash() != null && v.getExpiresAt() != null
++                            && v.getExpiresAt().isAfter(at) && v.getAttempts() < max) {
++                        setAttempts(v, v.getAttempts() + 1);
++                        yield 1;
++                    }
++                    yield 0;
++                }
++            }
++            case "deleteExpired" -> 0;
++            default -> throw new UnsupportedOperationException(method.getName());
++        });
++    }
++
++    private static void setAttempts(PhoneVerification v, int value) {
++        try {
++            java.lang.reflect.Field f = PhoneVerification.class.getDeclaredField("attempts");
++            f.setAccessible(true);
++            f.setInt(v, value);
++        } catch (ReflectiveOperationException e) {
++            throw new IllegalStateException(e);
++        }
++    }
++
++    private CallBudgetRepository budgets() {
++        return proxy(CallBudgetRepository.class, (method, args) -> switch (method.getName()) {
++            case "findById" -> Optional.ofNullable(budgetStore.get((LocalDate) args[0])).map(c -> new CallBudget((LocalDate) args[0], c));
++            case "increment" -> {
++                budgetStore.merge((LocalDate) args[0], 1, Integer::sum);
++                yield 1;
++            }
++            case "deleteBefore" -> {
++                int before = budgetStore.size();
++                budgetStore.keySet().removeIf(day -> day.isBefore((LocalDate) args[0]));
++                yield before - budgetStore.size();
++            }
++            default -> throw new UnsupportedOperationException(method.getName());
++        });
++    }
++
++    private PhoneDeviceRepository devices() {
++        return proxy(PhoneDeviceRepository.class, (method, args) -> switch (method.getName()) {
++            case "existsByPhoneAndDeviceHashAndExpiresAtAfter" -> {
++                Instant expires = deviceStore.get(args[0] + "|" + args[1]);
++                yield expires != null && expires.isAfter((Instant) args[2]);
++            }
++            case "upsert" -> {
++                deviceStore.put(args[0] + "|" + args[1], (Instant) args[3]);
++                yield 1;
++            }
++            case "deleteExpired" -> {
++                int before = deviceStore.size();
++                deviceStore.values().removeIf(expires -> expires.isBefore((Instant) args[0]));
++                yield before - deviceStore.size();
++            }
++            default -> throw new UnsupportedOperationException(method.getName());
++        });
++    }
++
++    private interface Handler {
++        Object handle(java.lang.reflect.Method method, Object[] args);
++    }
++
++    @SuppressWarnings("unchecked")
++    private static <T> T proxy(Class<T> type, Handler handler) {
++        InvocationHandler h = (self, method, args) -> method.getDeclaringClass() == Object.class
++                ? method.invoke(handler, args)
++                : handler.handle(method, args);
++        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, h);
++    }
++}
+--- /dev/null
++++ b/src/test/java/ru/big/survey/service/ResponseServiceEventCheckTest.java
+@@ -0,0 +1,73 @@
++package ru.big.survey.service;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Proxy;
++import java.time.Instant;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Optional;
++import java.util.UUID;
++import org.junit.jupiter.api.Test;
++import ru.big.survey.domain.Event;
++import ru.big.survey.persistence.EventRepository;
++
++/** Шаги подтверждения телефона (звонок, ввод кода) доступны только для существующего и открытого мероприятия. */
++class ResponseServiceEventCheckTest {
++
++    private final Map<UUID, Event> store = new HashMap<>();
++    private final ResponseService service = new ResponseService(events(), null, null, null, null, null, null, null, null);
++
++    @Test
++    void unknown_event_is_not_found() {
++        assertThatThrownBy(() -> service.requireOpenEvent(UUID.randomUUID()))
++                .isInstanceOf(ApiException.class)
++                .extracting(e -> ((ApiException) e).getCode()).isEqualTo("not_found");
++    }
++
++    @Test
++    void event_without_published_version_or_inactive_is_closed() throws Exception {
++        UUID unpublished = add(0, true);
++        UUID inactive = add(1, false);
++
++        assertThatThrownBy(() -> service.requireOpenEvent(unpublished))
++                .isInstanceOf(ApiException.class).extracting(e -> ((ApiException) e).getCode()).isEqualTo("closed");
++        assertThatThrownBy(() -> service.requireOpenEvent(inactive))
++                .isInstanceOf(ApiException.class).extracting(e -> ((ApiException) e).getCode()).isEqualTo("closed");
++    }
++
++    @Test
++    void active_published_event_passes() throws Exception {
++        UUID open = add(1, true);
++
++        service.requireOpenEvent(open);   // не бросает
++        assertThat(store.containsKey(open)).isTrue();
++    }
++
++    private UUID add(int version, boolean active) throws Exception {
++        UUID id = UUID.randomUUID();
++        Event event = Event.create(id, Instant.parse("2026-10-21T10:00:00Z"));
++        set(event, "currentVersion", version);
++        set(event, "active", active);
++        store.put(id, event);
++        return id;
++    }
++
++    private static void set(Event event, String field, Object value) throws Exception {
++        Field f = Event.class.getDeclaredField(field);
++        f.setAccessible(true);
++        f.set(event, value);
++    }
++
++    private EventRepository events() {
++        return (EventRepository) Proxy.newProxyInstance(EventRepository.class.getClassLoader(), new Class<?>[]{EventRepository.class},
++                (self, method, args) -> {
++                    if (method.getName().equals("findById")) {
++                        return Optional.ofNullable(store.get((UUID) args[0]));
++                    }
++                    throw new UnsupportedOperationException(method.getName());
++                });
++    }
++}

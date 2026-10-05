@@ -4,23 +4,30 @@ import { adminApi, ApiError, type EventSummary } from "../api/client";
 import { fmtDateTime } from "../lib/format";
 import { Alert } from "../ui/Alert";
 import { QrCode } from "../ui/QrCode";
+import { usePanel } from "../staff/StaffLayout";
 
-type Row = Record<string, unknown> & { answers?: Record<string, unknown> };
+type Row = Record<string, unknown> & { answers?: Record<string, unknown>; giftItemCodes?: string[] };
+
+const shortCode = (c: string) => (c.length > 28 ? `${c.slice(0, 12)}…${c.slice(-6)}` : c);
 
 export function AdminEvent() {
   const { eventId = "" } = useParams();
+  const { user: me } = usePanel();
+  const isAdmin = me.roles.includes("ADMIN");
   const [event, setEvent] = useState<EventSummary | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [error, setError] = useState("");
+  const [ok, setOk] = useState("");
   const [showQr, setShowQr] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const size = 50;
 
   useEffect(() => {
     adminApi.event(eventId).then(setEvent).catch((e) => setError(e instanceof ApiError ? e.message : "Ошибка"));
   }, [eventId]);
-  useEffect(() => {
+  const loadRows = () =>
     adminApi
       .responses(eventId, page, size)
       .then((r) => {
@@ -28,7 +35,28 @@ export function AdminEvent() {
         setTotal(r.total);
       })
       .catch((e) => setError(e instanceof ApiError ? e.message : "Ошибка"));
+  useEffect(() => {
+    void loadRows();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId, page]);
+
+  /** Спорное снятие отметки выдачи: галка снимается, история выдачи и КМ сохраняются. */
+  const unaward = async (r: Row) => {
+    const id = String(r.id);
+    if (!window.confirm("Снять отметку «подарок выдан»? История выдачи и коды маркировки сохранятся, стенд сможет выдать подарок повторно.")) return;
+    setBusyId(id);
+    setError("");
+    try {
+      await adminApi.unaward(id);
+      setOk("Отметка выдачи снята, история сохранена.");
+      window.setTimeout(() => setOk(""), 4000);
+      await loadRows();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось снять отметку.");
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const columns = Array.from(new Set(rows.flatMap((r) => Object.keys(r.answers ?? {}))));
 
@@ -36,6 +64,7 @@ export function AdminEvent() {
     <div className="page page-wide">
       <p><Link to="/admin">← Мероприятия</Link></p>
       {error && <Alert kind="error">{error}</Alert>}
+      {ok && <Alert kind="ok">{ok}</Alert>}
       {event && (
         <div className="card">
           <h1>{event.name}</h1>
@@ -78,7 +107,24 @@ export function AdminEvent() {
                 <td className="small">{fmtDateTime(String(r.submittedAt))}<div className="muted">v{String(r.version)}</div></td>
                 <td>{String(r.phone)}</td>
                 {event?.giftEnabled && (
-                  <td>{r.giftAwarded ? <span className="badge ok">выдан</span> : <span className="badge muted">нет</span>}<div className="muted small">код {String(r.giftCode ?? "")}</div></td>
+                  <td>
+                    {r.giftAwarded ? <span className="badge ok">выдан</span> : <span className="badge muted">нет</span>}
+                    {r.giftAwardedAt ? (
+                      <div className="muted small">
+                        {fmtDateTime(String(r.giftAwardedAt))}{r.giftAwardedBy ? ` · ${String(r.giftAwardedBy)}` : ""}
+                        {!r.giftAwarded && " (снято)"}
+                      </div>
+                    ) : null}
+                    {(r.giftItemCodes ?? []).length > 0 && (
+                      <div className="muted small">КМ: {(r.giftItemCodes ?? []).map(shortCode).join(", ")}</div>
+                    )}
+                    <div className="muted small">код {String(r.giftCode ?? "")}</div>
+                    {isAdmin && r.giftAwarded === true && (
+                      <button type="button" className="ghost sm" disabled={busyId === String(r.id)} onClick={() => unaward(r)}>
+                        снять отметку (спор)
+                      </button>
+                    )}
+                  </td>
                 )}
                 {columns.map((c) => <td key={c}>{String(r.answers?.[c] ?? "")}</td>)}
               </tr>

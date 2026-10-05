@@ -30,4 +30,9 @@ public record Actor(String username, Set<Role> roles) {
     public boolean isAdmin() {
         return roles.contains(Role.ADMIN);
     }
+
+    /** Супервайзер без полной админской роли: админские операции ограничены назначенными мероприятиями. */
+    public boolean isSupervisor() {
+        return roles.contains(Role.SUPERVISOR) && !roles.contains(Role.ADMIN);
+    }
 }
