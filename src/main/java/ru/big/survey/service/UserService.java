@@ -9,6 +9,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.big.survey.config.SurveyProperties;
@@ -72,6 +73,15 @@ public class UserService {
     public AppUser require(String username) {
         return users.findByUsernameAndActiveTrue(AppUser.normalizeUsername(username))
                 .orElseThrow(() -> ApiException.notFound("Пользователь не найден"));
+    }
+
+    /** Проверяем, что пароль и роли, использованные при входе, ещё действуют до создания сессии. */
+    @Transactional(readOnly = true)
+    public AppUser requireAuthenticatedUser(String username, int authVersion) {
+        return users.findByUsernameAndActiveTrue(AppUser.normalizeUsername(username))
+                .filter(user -> user.getAuthVersion() == authVersion)
+                .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "credentials_changed",
+                        "Учётные данные изменились. Повторите вход."));
     }
 
     /**
@@ -156,7 +166,7 @@ public class UserService {
             }
             user.setActive(active, clock.instant());
         }
-        audit.ok(null, "USER", actor.username(), Map.of("action", "update", "username", user.getUsername(),
+        audit.okInTransaction(null, "USER", actor.username(), Map.of("action", "update", "username", user.getUsername(),
                 "roles", newRoles.toString(), "active", user.isActive(), "passwordChanged", hash != null,
                 "events", user.getEventIds().size()));
         return user;

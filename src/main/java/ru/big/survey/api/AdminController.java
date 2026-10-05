@@ -1,6 +1,8 @@
 package ru.big.survey.api;
 
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
@@ -21,6 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 import ru.big.survey.domain.AppUser;
 import ru.big.survey.domain.Role;
 import ru.big.survey.security.Actor;
+import ru.big.survey.security.SessionRevalidationFilter;
 import ru.big.survey.service.AdminService;
 import ru.big.survey.service.GiftService;
 import ru.big.survey.service.UserService;
@@ -136,9 +139,18 @@ public class AdminController {
                                     Boolean blockRejectedMarks, Set<UUID> eventIds) {}
 
     @PatchMapping("/users/{id}")
-    public Map<String, Object> updateUser(@PathVariable UUID id, @RequestBody UpdateUserRequest request, Authentication auth) {
+    public Map<String, Object> updateUser(@PathVariable UUID id, @RequestBody UpdateUserRequest request, Authentication auth,
+                                          HttpServletRequest http) {
+        Actor actor = Actor.of(auth);
         AppUser user = users.update(id, request.displayName(), request.password(), request.roles(), request.active(),
-                request.blockRejectedMarks(), request.eventIds(), Actor.of(auth));
+                request.blockRejectedMarks(), request.eventIds(), actor);
+        // Сменил свой пароль: текущий сеанс остаётся, остальные сеансы этого пользователя закроются. Если менялись роли,
+        // права в сессии устарели, поэтому сеанс не обновляем: после изменения нужно войти заново.
+        HttpSession session = http.getSession(false);
+        if (session != null && user.isActive() && user.getUsername().equals(AppUser.normalizeUsername(actor.username()))
+                && user.getRoles().equals(actor.roles())) {
+            session.setAttribute(SessionRevalidationFilter.VERSION_ATTRIBUTE, user.getAuthVersion());
+        }
         return AuthController.userView(user);
     }
 }

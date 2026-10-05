@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContext;
@@ -18,6 +19,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import ru.big.survey.domain.AppUser;
+import ru.big.survey.security.AppUserPrincipal;
+import ru.big.survey.security.SessionRevalidationFilter;
 import ru.big.survey.service.AuditService;
 import ru.big.survey.service.UserService;
 
@@ -45,6 +48,11 @@ public class AuthController {
     public Map<String, Object> login(@RequestBody LoginRequest request, HttpServletRequest http, HttpServletResponse response) {
         Authentication authentication = authenticationManager.authenticate(
                 UsernamePasswordAuthenticationToken.unauthenticated(request.username().trim(), request.password()));
+        if (!(authentication.getPrincipal() instanceof AppUserPrincipal principal)) {
+            throw new BadCredentialsException("Не удалось подтвердить версию учётных данных.");
+        }
+        // Изменения во время проверки пароля требуют нового входа. Контекст сохраняем только после проверки.
+        AppUser user = users.requireAuthenticatedUser(authentication.getName(), principal.getAuthVersion());
         SecurityContext context = SecurityContextHolder.createEmptyContext();
         context.setAuthentication(authentication);
         SecurityContextHolder.setContext(context);
@@ -53,7 +61,8 @@ public class AuthController {
             http.changeSessionId();
         }
         securityContextRepository.saveContext(context, http, response);
-        AppUser user = users.require(authentication.getName());
+        // Даже если БД изменится после проверки выше, сессия сохранит проверенную версию и будет отозвана фильтром.
+        http.getSession().setAttribute(SessionRevalidationFilter.VERSION_ATTRIBUTE, principal.getAuthVersion());
         audit.ok(null, "LOGIN", user.getUsername(), Map.of("roles", user.getRoles().toString()));
         return userView(user);
     }

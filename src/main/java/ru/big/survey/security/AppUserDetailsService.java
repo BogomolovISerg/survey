@@ -2,7 +2,6 @@ package ru.big.survey.security;
 
 import java.util.List;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
@@ -29,6 +28,6 @@ public class AppUserDetailsService implements UserDetailsService {
         List<SimpleGrantedAuthority> authorities = user.getRoles().stream()
                 .map(role -> new SimpleGrantedAuthority("ROLE_" + role.name()))
                 .toList();
-        return User.withUsername(user.getUsername()).password(user.getPasswordHash()).authorities(authorities).build();
+        return new AppUserPrincipal(user.getUsername(), user.getPasswordHash(), authorities, user.getAuthVersion());
     }
 }

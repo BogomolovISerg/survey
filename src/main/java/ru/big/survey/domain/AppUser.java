@@ -10,6 +10,7 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -53,6 +54,15 @@ public class AppUser {
     @Column(name = "event_id", nullable = false)
     private Set<UUID> eventIds = new HashSet<>();
 
+    /** Растёт при смене пароля, ролей и признака «активен»: сессии с прежней версией закрываются. */
+    @Column(name = "auth_version", nullable = false)
+    private int authVersion;
+
+    /** Контроль конкурентных записей: устаревшая правка не может вернуть старые пароль, роли или authVersion. */
+    @Version
+    @Column(name = "row_version", nullable = false)
+    private long rowVersion;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -73,8 +83,12 @@ public class AppUser {
     public void apply(String username, String displayName, String passwordHash, Set<Role> roles, Instant now) {
         this.username = normalizeUsername(username);
         this.displayName = displayName == null ? this.username : displayName.trim();
+        boolean rolesChanged = !this.roles.equals(roles);
         if (passwordHash != null) {
             this.passwordHash = passwordHash;
+        }
+        if (passwordHash != null || rolesChanged) {
+            this.authVersion++;
         }
         this.roles.clear();
         this.roles.addAll(roles);
@@ -90,6 +104,9 @@ public class AppUser {
     }
 
     public void setActive(boolean active, Instant now) {
+        if (this.active != active) {
+            this.authVersion++;   // и при отключении, и при повторном включении: старые сессии не должны «ожить»
+        }
         this.active = active;
         this.updatedAt = now;
     }
@@ -109,6 +126,7 @@ public class AppUser {
     public String getPasswordHash() { return passwordHash; }
     public boolean isActive() { return active; }
     public boolean isBlockRejectedMarks() { return blockRejectedMarks; }
+    public int getAuthVersion() { return authVersion; }
     public Set<Role> getRoles() { return Set.copyOf(roles); }
     public Set<UUID> getEventIds() { return Set.copyOf(eventIds); }
     public Instant getCreatedAt() { return createdAt; }

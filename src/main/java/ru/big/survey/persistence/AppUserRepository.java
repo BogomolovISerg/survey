@@ -12,6 +12,9 @@ public interface AppUserRepository extends JpaRepository<AppUser, UUID> {
 
     Optional<AppUser> findByUsernameAndActiveTrue(String username);
 
+    /** Для проверки живой сессии на каждом запросе: только признак активности и версия. */
+    Optional<UserSessionState> findStateByUsername(String username);
+
     List<AppUser> findAllByOrderByUsernameAsc();
 
     long countByActiveTrue();

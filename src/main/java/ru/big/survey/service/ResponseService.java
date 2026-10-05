@@ -52,6 +52,15 @@ public class ResponseService {
         this.clock = clock;
     }
 
+    /** Шаги подтверждения телефона доступны только для существующего и открытого мероприятия: 404 — нет, 410 — закрыто. */
+    @Transactional(readOnly = true)
+    public void requireOpenEvent(UUID eventId) {
+        Event event = events.findById(eventId).orElseThrow(() -> ApiException.notFound("Анкета не найдена. Отсканируйте QR-код ещё раз."));
+        if (!event.acceptsResponses()) {
+            throw ApiException.gone("Мероприятие завершено, анкета закрыта.");
+        }
+    }
+
     /** Схема анкеты для клиента (последняя версия) + блок event. 404 — нет мероприятия, 410 — закрыто. */
     @Transactional(readOnly = true)
     public ObjectNode publicSchema(UUID eventId) {

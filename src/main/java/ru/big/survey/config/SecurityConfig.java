@@ -19,11 +19,14 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
 import ru.big.survey.domain.Role;
 import ru.big.survey.security.AppUserDetailsService;
+import ru.big.survey.security.SessionRevalidationFilter;
+import ru.big.survey.security.SessionValidator;
 import ru.big.survey.service.UserService;
 
 /**
@@ -89,11 +92,14 @@ public class SecurityConfig {
     @Bean
     @Order(2)
     SecurityFilterChain appFilterChain(HttpSecurity http, DaoAuthenticationProvider provider,
-                                       SecurityContextRepository securityContextRepository) throws Exception {
+                                       SecurityContextRepository securityContextRepository,
+                                       SessionValidator sessionValidator) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
                 .securityContext(context -> context.securityContextRepository(securityContextRepository))
                 .authenticationProvider(provider)
+                // сверка вошедшего с БД на каждом запросе: отключение, смена пароля и ролей действуют сразу
+                .addFilterBefore(new SessionRevalidationFilter(sessionValidator), AuthorizationFilter.class)
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/api/v1/public/**", "/api/v1/auth/login", "/api/v1/auth/me").permitAll()
                         .requestMatchers("/api/v1/staff/**").hasAnyRole(Role.STAFF.name(), Role.ADMIN.name(), Role.SUPERVISOR.name())

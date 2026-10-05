@@ -1,6 +1,7 @@
 package ru.big.survey.api;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.constraints.NotBlank;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import ru.big.survey.config.SurveyProperties;
 import ru.big.survey.service.Json;
 import ru.big.survey.service.PhoneVerificationService;
 import ru.big.survey.service.ResponseService;
@@ -23,7 +25,8 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * Публичный API анкеты (без авторизации; защита — токены и лимиты).
  *   GET  /api/v1/public/events/{guid}                    — схема анкеты
- *   POST /api/v1/public/events/{guid}/phone/call         — заказать flash-call {phone}
+ *   POST /api/v1/public/events/{guid}/phone/call         — заказать flash-call {phone}; с cookie SURVEYDEV известного
+ *                                                          устройства звонок не нужен (already_verified + token)
  *   POST /api/v1/public/events/{guid}/phone/verify       — проверить код {phone, code} → {token}
  *   POST /api/v1/public/events/{guid}/responses          — отправить ответ {token, answers, consent}
  *   GET  /api/v1/public/events/{guid}/gift?token=        — статус подарка и данные QR
@@ -35,11 +38,14 @@ public class PublicController {
     private final ResponseService responseService;
     private final PhoneVerificationService verification;
     private final Json json;
+    private final SurveyProperties properties;
 
-    public PublicController(ResponseService responseService, PhoneVerificationService verification, Json json) {
+    public PublicController(ResponseService responseService, PhoneVerificationService verification, Json json,
+                            SurveyProperties properties) {
         this.responseService = responseService;
         this.verification = verification;
         this.json = json;
+        this.properties = properties;
     }
 
     @GetMapping("/{eventId}")
@@ -50,8 +56,9 @@ public class PublicController {
     public record PhoneRequest(@NotBlank String phone) {}
 
     @PostMapping("/{eventId}/phone/call")
-    public Map<String, Object> call(@PathVariable UUID eventId, @RequestBody PhoneRequest request) {
-        PhoneVerificationService.CallResult r = verification.call(request.phone());
+    public Map<String, Object> call(@PathVariable UUID eventId, @RequestBody PhoneRequest request, HttpServletRequest http) {
+        responseService.requireOpenEvent(eventId);
+        PhoneVerificationService.CallResult r = verification.call(request.phone(), DeviceCookie.read(http));
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", r.status());
         body.put("message", r.message());
@@ -67,8 +74,12 @@ public class PublicController {
     public record VerifyRequest(@NotBlank String phone, @NotBlank String code) {}
 
     @PostMapping("/{eventId}/phone/verify")
-    public Map<String, Object> verify(@PathVariable UUID eventId, @RequestBody VerifyRequest request) {
+    public Map<String, Object> verify(@PathVariable UUID eventId, @RequestBody VerifyRequest request,
+                                      HttpServletRequest http, HttpServletResponse response) {
+        responseService.requireOpenEvent(eventId);
         PhoneVerificationService.VerifyResult r = verification.verify(request.phone(), request.code());
+        // cookie живёт столько же, сколько подтверждение телефона на сервере (verified-valid)
+        DeviceCookie.write(http, response, r.deviceSecret(), properties.getVerification().getVerifiedValid());
         return Map.of("verified", true, "token", r.token(), "validUntil", r.validUntil().toString());
     }
 

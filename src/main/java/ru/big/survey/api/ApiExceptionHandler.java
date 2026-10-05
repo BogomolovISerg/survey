@@ -2,10 +2,12 @@ package ru.big.survey.api;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import jakarta.persistence.OptimisticLockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -55,6 +57,12 @@ public class ApiExceptionHandler {
     @ExceptionHandler(AccessDeniedException.class)
     ResponseEntity<Map<String, Object>> forbidden(AccessDeniedException e) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "forbidden", "message", "Недостаточно прав."));
+    }
+
+    @ExceptionHandler({OptimisticLockingFailureException.class, OptimisticLockException.class})
+    ResponseEntity<Map<String, Object>> concurrentUpdate(Exception e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "concurrent_update",
+                "message", "Запись уже изменена другим запросом. Обновите данные и повторите действие."));
     }
 
     @ExceptionHandler(Exception.class)

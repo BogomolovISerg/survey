@@ -69,10 +69,6 @@ public class PhoneVerification {
         callsToday++;
     }
 
-    public void registerAttempt() {
-        this.attempts++;
-    }
-
     public void markVerified(Instant now, Instant verifiedUntil) {
         this.verified = true;
         this.verifiedAt = now;

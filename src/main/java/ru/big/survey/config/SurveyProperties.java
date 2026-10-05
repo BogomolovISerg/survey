@@ -70,6 +70,8 @@ public class SurveyProperties {
         private Duration resendAfter = Duration.ofSeconds(60);
         private Duration verifiedValid = Duration.ofHours(24);
         private int maxCallsPerPhonePerDay = 8;
+        /** Общий суточный предел заказов звонка на весь сервис; 0 — без ограничения. */
+        private int maxCallsPerDay = 0;
 
         public Duration getCodeTtl() { return codeTtl; }
         public void setCodeTtl(Duration codeTtl) { this.codeTtl = codeTtl; }
@@ -81,6 +83,8 @@ public class SurveyProperties {
         public void setVerifiedValid(Duration verifiedValid) { this.verifiedValid = verifiedValid; }
         public int getMaxCallsPerPhonePerDay() { return maxCallsPerPhonePerDay; }
         public void setMaxCallsPerPhonePerDay(int maxCallsPerPhonePerDay) { this.maxCallsPerPhonePerDay = maxCallsPerPhonePerDay; }
+        public int getMaxCallsPerDay() { return maxCallsPerDay; }
+        public void setMaxCallsPerDay(int maxCallsPerDay) { this.maxCallsPerDay = maxCallsPerDay; }
     }
 
     /**
