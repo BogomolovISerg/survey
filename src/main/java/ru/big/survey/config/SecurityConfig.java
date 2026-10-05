@@ -29,9 +29,8 @@ import ru.big.survey.service.UserService;
 /**
  * Две цепочки:
  *  1) /api/v1/sync/** — HTTP Basic без сессии, только роль INTEGRATION (учётка 1С); снаружи путь дополнительно закрыт в nginx;
- *  2) всё остальное — сессия в cookie: публичные пути (анкета, SPA, health) открыты, /api/v1/staff/** — STAFF|ADMIN|SUPERVISOR,
- *     /api/v1/admin/** — ADMIN|SUPERVISOR (супервайзер ограничен назначенными мероприятиями на уровне сервисов;
- *     журнал и спорное снятие выдачи — только ADMIN). Вход — POST /api/v1/auth/login (JSON), контекст сохраняется в HttpSession.
+ *  2) всё остальное — сессия в cookie: публичные пути (анкета, SPA, health) открыты, /api/v1/staff/** — STAFF|ADMIN,
+ *     /api/v1/admin/** — ADMIN. Вход — POST /api/v1/auth/login (JSON), контекст сохраняется в HttpSession.
  * CSRF отключён осознанно: API принимает только JSON, cookie сессии SameSite=Lax, форм с браузерным submit нет.
  */
 @Configuration
@@ -96,12 +95,8 @@ public class SecurityConfig {
                 .authenticationProvider(provider)
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/api/v1/public/**", "/api/v1/auth/login", "/api/v1/auth/me").permitAll()
-                        .requestMatchers("/api/v1/staff/**").hasAnyRole(Role.STAFF.name(), Role.ADMIN.name(), Role.SUPERVISOR.name())
-                        // журнал синхронизаций, спорное снятие отметки выдачи и поиск по телефону — только полный администратор
-                        .requestMatchers("/api/v1/admin/log").hasRole(Role.ADMIN.name())
-                        .requestMatchers("/api/v1/admin/responses/*/gift/unaward").hasRole(Role.ADMIN.name())
-                        .requestMatchers("/api/v1/admin/responses/search").hasRole(Role.ADMIN.name())
-                        .requestMatchers("/api/v1/admin/**").hasAnyRole(Role.ADMIN.name(), Role.SUPERVISOR.name())
+                        .requestMatchers("/api/v1/staff/**").hasAnyRole(Role.STAFF.name(), Role.ADMIN.name())
+                        .requestMatchers("/api/v1/admin/**").hasRole(Role.ADMIN.name())
                         .requestMatchers("/api/**").authenticated()
                         .requestMatchers("/actuator/health/**").permitAll()
                         .anyRequest().permitAll())   // SPA, статика, /e/{guid}, /staff, /admin — страницы; доступ к данным решает API

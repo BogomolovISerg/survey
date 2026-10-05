@@ -16,7 +16,6 @@ public class SurveyProperties {
     private Security security = new Security();
     private Verification verification = new Verification();
     private FlashCall flashCall = new FlashCall();
-    private MarkingCheck markingCheck = new MarkingCheck();
     private int giftCodeLength = 6;
 
     public String getPublicBaseUrl() {
@@ -30,8 +29,6 @@ public class SurveyProperties {
     public void setVerification(Verification verification) { this.verification = verification; }
     public FlashCall getFlashCall() { return flashCall; }
     public void setFlashCall(FlashCall flashCall) { this.flashCall = flashCall; }
-    public MarkingCheck getMarkingCheck() { return markingCheck; }
-    public void setMarkingCheck(MarkingCheck markingCheck) { this.markingCheck = markingCheck; }
     public int getGiftCodeLength() { return giftCodeLength; }
     public void setGiftCodeLength(int giftCodeLength) { this.giftCodeLength = giftCodeLength; }
 
@@ -81,37 +78,6 @@ public class SurveyProperties {
         public void setVerifiedValid(Duration verifiedValid) { this.verifiedValid = verifiedValid; }
         public int getMaxCallsPerPhonePerDay() { return maxCallsPerPhonePerDay; }
         public void setMaxCallsPerPhonePerDay(int maxCallsPerPhonePerDay) { this.maxCallsPerPhonePerDay = maxCallsPerPhonePerDay; }
-    }
-
-    /**
-     * Онлайн-проверка кодов маркировки в «Честном знаке» при сканировании на стенде.
-     * provider=crpt — официальное True API (codes/check, нужен токен: его получает 1С по УКЭП и
-     * доставляет через PUT /api/v1/sync/marking-token; на время отладки можно задать token в конфиге);
-     * stub — для теста (коды с "BAD" отклоняются, с "ERR" — «ЧЗ недоступен»); off — проверка выключена.
-     * fail-open=true: при недоступности ЧЗ выдача НЕ блокируется (код помечается непроверенным).
-     */
-    public static class MarkingCheck {
-        /** crpt | stub | off */
-        private String provider = "off";
-        private String baseUrl = "https://markirovka.crpt.ru";
-        /** Токен True API на время отладки; в бою доставляется из 1С и имеет приоритет. */
-        private String token = "";
-        private Duration timeout = Duration.ofSeconds(6);
-        private Duration cacheTtl = Duration.ofMinutes(10);
-        private boolean failOpen = true;
-
-        public String getProvider() { return provider; }
-        public void setProvider(String provider) { this.provider = provider; }
-        public String getBaseUrl() { return baseUrl; }
-        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
-        public String getToken() { return token; }
-        public void setToken(String token) { this.token = token; }
-        public Duration getTimeout() { return timeout; }
-        public void setTimeout(Duration timeout) { this.timeout = timeout; }
-        public Duration getCacheTtl() { return cacheTtl; }
-        public void setCacheTtl(Duration cacheTtl) { this.cacheTtl = cacheTtl; }
-        public boolean isFailOpen() { return failOpen; }
-        public void setFailOpen(boolean failOpen) { this.failOpen = failOpen; }
     }
 
     public static class FlashCall {

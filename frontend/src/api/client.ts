@@ -1,5 +1,3 @@
-import type { GiftAwardMode } from "../lib/giftAwardMode";
-
 /** HTTP-клиент к API сервиса. Базовый путь берётся из base сборки (контекст /survey/). */
 
 export class ApiError extends Error {
@@ -87,10 +85,6 @@ export interface User {
   displayName: string;
   roles: string[];
   active: boolean;
-  /** блокировать выдачу при коде маркировки «не в обороте» (false — только предупреждение) */
-  blockRejectedMarks?: boolean;
-  /** id мероприятий, назначенных сотруднику (STAFF) */
-  events: string[];
 }
 
 export interface EventSummary {
@@ -99,9 +93,6 @@ export interface EventSummary {
   startsOn?: string;
   endsOn?: string;
   giftEnabled: boolean;
-  giftAwardMode?: GiftAwardMode;
-  giftMarked?: boolean;
-  giftMarkRequired?: boolean;
   active: boolean;
   version: number;
   publishedAt: string;
@@ -119,34 +110,12 @@ export interface Stats {
   eventId: string;
   eventName: string;
   giftEnabled: boolean;
-  giftAwardMode?: GiftAwardMode;
   total: number;
   lastHour: number;
   today: number;
   giftsAwarded: number;
-  manualGiftsAwarded: number;
-  recentManualGifts: ManualGiftReceipt[];
-  recent: {
-    responseId: string;
-    visitor: string;
-    city: string;
-    submittedAt: string;
-    awarded: boolean;
-    /** когда и кем выдан подарок (сохраняются и после спорного снятия отметки) */
-    awardedAt?: string;
-    awardedBy?: string;
-  }[];
+  recent: { responseId: string; visitor: string; city: string; submittedAt: string; awarded: boolean }[];
   at: string;
-}
-
-export interface ManualGiftReceipt {
-  awardId: string;
-  eventId?: string;
-  awardedAt: string;
-  awardedBy: string;
-  itemCodes: string[];
-  markWarnings?: string[];
-  result?: "ok" | "already";
 }
 
 export interface GiftCard {
@@ -154,11 +123,6 @@ export interface GiftCard {
   eventId: string;
   eventName: string;
   giftEnabled: boolean;
-  giftAwardMode?: GiftAwardMode;
-  /** мероприятие с маркированными подарками: доступно сканирование КМ */
-  giftMarked?: boolean;
-  /** без отсканированного КМ выдача запрещена */
-  giftMarkRequired?: boolean;
   visitor: string;
   city: string;
   submittedAt: string;
@@ -166,38 +130,7 @@ export interface GiftCard {
   awarded: boolean;
   awardedAt?: string;
   awardedBy?: string;
-  /** активные коды маркировки выданного подарка (может быть несколько) */
-  itemCodes?: string[];
-  /** предупреждения проверки «Честного знака» при выдаче без блокировки */
-  markWarnings?: string[];
   result?: "ok" | "already" | "removed" | "not_changed";
-}
-
-/** Результат проверки КМ в «Честном знаке» после сканирования. */
-export interface ItemCodeCheck {
-  status: "in_circulation" | "rejected" | "unknown" | "disabled";
-  /** режим сотрудника: true — «не в обороте» блокирует выдачу */
-  blocking: boolean;
-  message?: string;
-}
-
-export interface PhoneSearchResult {
-  items: {
-    id: string;
-    eventId: string;
-    eventName: string;
-    phone: string;
-    visitor: string;
-    city: string;
-    submittedAt: string;
-    giftCode: string;
-    giftAwarded: boolean;
-    giftAwardedAt?: string;
-    giftAwardedBy?: string;
-    giftItemCodes: string[];
-  }[];
-  total?: number;
-  error?: string;
 }
 
 // ---------- вызовы ----------
@@ -219,13 +152,9 @@ export const authApi = {
 
 export const staffApi = {
   events: () => api.get<EventSummary[]>("/staff/events"),
-  stats: (eventId: string, limit = 10) => api.get<Stats>(`/staff/events/${eventId}/stats?limit=${limit}`),
+  stats: (eventId: string) => api.get<Stats>(`/staff/events/${eventId}/stats`),
   lookup: (q: { token?: string; eventId?: string; code?: string }) => api.post<GiftCard>("/staff/gift/lookup", q),
-  award: (q: { token?: string; eventId?: string; code?: string; awarded: boolean; itemCodes?: string[] }) => api.post<GiftCard>("/staff/gift/award", q),
-  awardManual: (q: { requestId: string; eventId: string; itemCodes: string[] }) =>
-    api.post<ManualGiftReceipt>("/staff/gift/manual", q),
-  /** проверка КМ в «Честном знаке» сразу после сканирования */
-  checkItemCode: (code: string) => api.post<ItemCodeCheck>("/staff/gift/item-code/check", { code }),
+  award: (q: { token?: string; eventId?: string; code?: string; awarded: boolean }) => api.post<GiftCard>("/staff/gift/award", q),
 };
 
 export const adminApi = {
@@ -236,14 +165,9 @@ export const adminApi = {
   responses: (id: string, page = 0, size = 50) =>
     api.get<{ total: number; page: number; size: number; items: Record<string, unknown>[] }>(`/admin/events/${id}/responses?page=${page}&size=${size}`),
   csvUrl: (id: string) => `${API_BASE}/admin/events/${id}/export.csv`,
-  /** спорное снятие отметки выдачи (только ADMIN): галка снимается, история и КМ сохраняются */
-  unaward: (responseId: string) => api.post<GiftCard>(`/admin/responses/${responseId}/gift/unaward`),
-  /** поиск анкет по номеру телефона (только ADMIN); частичный ввод от 4 цифр — по окончанию номера */
-  searchResponses: (phone: string) => api.get<PhoneSearchResult>(`/admin/responses/search?phone=${encodeURIComponent(phone)}`),
   log: (eventId?: string, page = 0, size = 50) =>
     api.get<{ total: number; page: number; items: Record<string, unknown>[] }>(`/admin/log?page=${page}&size=${size}${eventId ? `&eventId=${eventId}` : ""}`),
   users: () => api.get<User[]>("/admin/users"),
-  createUser: (u: { username: string; displayName: string; password: string; roles: string[]; eventIds: string[] }) => api.post<User>("/admin/users", u),
-  updateUser: (id: string, u: { displayName?: string; password?: string; roles?: string[]; active?: boolean; blockRejectedMarks?: boolean; eventIds?: string[] }) =>
-    api.patch<User>(`/admin/users/${id}`, u),
+  createUser: (u: { username: string; displayName: string; password: string; roles: string[] }) => api.post<User>("/admin/users", u),
+  updateUser: (id: string, u: { displayName?: string; password?: string; roles?: string[]; active?: boolean }) => api.patch<User>(`/admin/users/${id}`, u),
 };

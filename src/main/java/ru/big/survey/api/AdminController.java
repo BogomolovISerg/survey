@@ -22,48 +22,35 @@ import ru.big.survey.domain.AppUser;
 import ru.big.survey.domain.Role;
 import ru.big.survey.security.Actor;
 import ru.big.survey.service.AdminService;
-import ru.big.survey.service.GiftService;
 import ru.big.survey.service.UserService;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
 
-/**
- * Админка: мероприятия, ответы, CSV, журнал, пользователи.
- * ADMIN — без ограничений; SUPERVISOR — только назначенные мероприятия и STAFF-пользователи на них
- * (журнал и спорное снятие выдачи закрыты на уровне SecurityConfig).
- */
+/** Админка (роль ADMIN): мероприятия, ответы, CSV, журнал, пользователи. */
 @RestController
 @RequestMapping("/api/v1/admin")
 public class AdminController {
 
     private final AdminService admin;
     private final UserService users;
-    private final GiftService gifts;
 
-    public AdminController(AdminService admin, UserService users, GiftService gifts) {
+    public AdminController(AdminService admin, UserService users) {
         this.admin = admin;
         this.users = users;
-        this.gifts = gifts;
-    }
-
-    private Set<UUID> allowed(Authentication auth) {
-        return users.allowedEventIds(Actor.of(auth));
     }
 
     @GetMapping("/events")
-    public List<ObjectNode> events(Authentication auth) {
-        return admin.allEvents(allowed(auth));
+    public List<ObjectNode> events() {
+        return admin.allEvents();
     }
 
     @GetMapping("/events/{eventId}")
-    public ObjectNode event(@PathVariable UUID eventId, Authentication auth) {
-        AdminService.assertEventAllowed(eventId, allowed(auth));
+    public ObjectNode event(@PathVariable UUID eventId) {
         return admin.eventDetails(eventId);
     }
 
     @GetMapping("/events/{eventId}/questionnaire")
-    public JsonNode questionnaire(@PathVariable UUID eventId, @RequestParam(required = false) Integer version, Authentication auth) {
-        AdminService.assertEventAllowed(eventId, allowed(auth));
+    public JsonNode questionnaire(@PathVariable UUID eventId, @RequestParam(required = false) Integer version) {
         return admin.questionnaire(eventId, version);
     }
 
@@ -71,42 +58,23 @@ public class AdminController {
 
     @PatchMapping("/events/{eventId}")
     public ObjectNode setActive(@PathVariable UUID eventId, @RequestBody ActiveRequest request, Authentication auth) {
-        AdminService.assertEventAllowed(eventId, allowed(auth));
         return admin.setActive(eventId, request.active(), Actor.of(auth));
     }
 
     @GetMapping("/events/{eventId}/responses")
     public ObjectNode responses(@PathVariable UUID eventId,
                                 @RequestParam(defaultValue = "0") int page,
-                                @RequestParam(defaultValue = "50") int size,
-                                Authentication auth) {
-        AdminService.assertEventAllowed(eventId, allowed(auth));
+                                @RequestParam(defaultValue = "50") int size) {
         return admin.responsesPage(eventId, page, size);
     }
 
     @GetMapping(value = "/events/{eventId}/export.csv", produces = "text/csv")
     public void csv(@PathVariable UUID eventId, Authentication auth, HttpServletResponse response) throws IOException {
-        AdminService.assertEventAllowed(eventId, allowed(auth));
         response.setContentType("text/csv; charset=UTF-8");
         response.setHeader("Content-Disposition", "attachment; filename=\"survey-" + eventId + ".csv\"");
         try (Writer out = new OutputStreamWriter(response.getOutputStream(), StandardCharsets.UTF_8)) {
             admin.writeCsv(eventId, out, Actor.of(auth));
         }
-    }
-
-    /**
-     * Спорное снятие отметки «подарок выдан» (только ADMIN, маршрут закрыт в SecurityConfig):
-     * галка снимается, но дата/автор выдачи и коды маркировки сохраняются; выдача повторно возможна.
-     */
-    @PostMapping("/responses/{responseId}/gift/unaward")
-    public ObjectNode unaward(@PathVariable UUID responseId, Authentication auth) {
-        return gifts.disputeUnaward(responseId, Actor.of(auth));
-    }
-
-    /** Поиск анкет по номеру телефона (только ADMIN, маршрут закрыт в SecurityConfig). */
-    @GetMapping("/responses/search")
-    public ObjectNode searchResponses(@RequestParam String phone) {
-        return admin.searchByPhone(phone);
     }
 
     @GetMapping("/log")
@@ -119,26 +87,23 @@ public class AdminController {
     // ---------- пользователи ----------
 
     @GetMapping("/users")
-    public List<Map<String, Object>> users(Authentication auth) {
-        return users.list(Actor.of(auth)).stream().map(AuthController::userView).toList();
+    public List<Map<String, Object>> users() {
+        return users.list().stream().map(AuthController::userView).toList();
     }
 
-    public record CreateUserRequest(String username, String displayName, String password, Set<Role> roles, Set<UUID> eventIds) {}
+    public record CreateUserRequest(String username, String displayName, String password, Set<Role> roles) {}
 
     @PostMapping("/users")
     public Map<String, Object> createUser(@RequestBody CreateUserRequest request, Authentication auth) {
-        AppUser user = users.create(request.username(), request.displayName(), request.password(), request.roles(),
-                request.eventIds(), Actor.of(auth));
+        AppUser user = users.create(request.username(), request.displayName(), request.password(), request.roles(), Actor.of(auth));
         return AuthController.userView(user);
     }
 
-    public record UpdateUserRequest(String displayName, String password, Set<Role> roles, Boolean active,
-                                    Boolean blockRejectedMarks, Set<UUID> eventIds) {}
+    public record UpdateUserRequest(String displayName, String password, Set<Role> roles, Boolean active) {}
 
     @PatchMapping("/users/{id}")
     public Map<String, Object> updateUser(@PathVariable UUID id, @RequestBody UpdateUserRequest request, Authentication auth) {
-        AppUser user = users.update(id, request.displayName(), request.password(), request.roles(), request.active(),
-                request.blockRejectedMarks(), request.eventIds(), Actor.of(auth));
+        AppUser user = users.update(id, request.displayName(), request.password(), request.roles(), request.active(), Actor.of(auth));
         return AuthController.userView(user);
     }
 }

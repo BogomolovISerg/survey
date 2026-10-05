@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router";
-import { APP_BASE, ApiError, publicApi, type GiftInfo } from "../api/client";
+import { ApiError, publicApi, type GiftInfo } from "../api/client";
 import { isVisible } from "../lib/conditions";
 import { buildPayload, parseSchema, SchemaError, type Schema } from "../lib/schema";
 import { applyServerTheme } from "../lib/theme";
@@ -10,7 +10,7 @@ import { ComponentBlock, hasPhoneField, missingRequired } from "./ComponentBlock
 import { GiftScreen } from "./GiftScreen";
 import type { PhoneState } from "./PhoneVerify";
 
-const CONSENT_PDF = `${APP_BASE}/consent.pdf`;
+const CONSENT_TEXT = "Нажимая «Отправить», вы даёте согласие на обработку персональных данных.";
 
 const storageKey = (eventId: string) => `survey.phone.${eventId}`;
 
@@ -86,25 +86,6 @@ export function SurveyPage() {
     void load();
   }, [load]);
 
-  // С этого номера анкета уже отправлена? Сразу показываем экран подарка со свежим QR,
-  // не заставляя заполнять анкету заново (актуально при повторном визите и спорной повторной выдаче).
-  useEffect(() => {
-    if (!phone || submit !== "idle") return;
-    let alive = true;
-    publicApi
-      .gift(eventId, phone.token)
-      .then((g) => {
-        if (!alive) return;
-        setGift(g);
-        setAlready(true);
-        setSubmit("done");
-      })
-      .catch(() => undefined); // 404 — анкеты ещё нет, продолжаем заполнение
-    return () => {
-      alive = false;
-    };
-  }, [eventId, phone, submit]);
-
   const setAnswer = useCallback((key: string, value: unknown) => setAnswers((a) => ({ ...a, [key]: value })), []);
 
   /** Видимые компоненты по порядку схемы (скрытые по условию пропускаются и не считаются шагом). */
@@ -179,7 +160,7 @@ export function SurveyPage() {
           <section className="card center">
             <h1>{already ? "Анкета уже заполнена" : "Спасибо!"}</h1>
             <p className="muted">
-              {already ? "С этого номера телефона анкета уже отправлена — повторно заполнять не нужно." : "Ваша анкета отправлена."}
+              {already ? "С этого номера телефона анкета уже отправлена — повторно заполнять не нужно." : "Ваши ответы отправлены."}
             </p>
           </section>
           {gift && phone && <GiftScreen eventId={eventId} eventName={schema.event.name} gift={gift} token={phone.token} />}
@@ -213,13 +194,7 @@ export function SurveyPage() {
             <section className="card">
               <label className="consent">
                 <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
-                <span>
-                  Нажимая «Отправить», вы даёте{" "}
-                  <a href={CONSENT_PDF} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-                    согласие на обработку персональных данных
-                  </a>
-                  {" "}(PDF).
-                </span>
+                <span>{CONSENT_TEXT}</span>
               </label>
               {needsPhone && !phone && <Alert kind="error">Подтвердите номер телефона в анкете, чтобы отправить.</Alert>}
               {submitError && <Alert kind="error">{submitError}</Alert>}

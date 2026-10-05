@@ -31,21 +31,16 @@ public class GiftAward {
     @Column(nullable = false, length = 16)
     private String source;
 
-    /** код подарка (маркировка), если сканировался */
-    @Column(name = "item_code", length = 512)
-    private String itemCode;
-
     protected GiftAward() {
     }
 
-    public static GiftAward of(UUID responseId, boolean awarded, String byUser, String source, String itemCode, Instant now) {
+    public static GiftAward of(UUID responseId, boolean awarded, String byUser, String source, Instant now) {
         GiftAward g = new GiftAward();
         g.id = UUID.randomUUID();
         g.responseId = responseId;
         g.awarded = awarded;
         g.byUser = byUser;
         g.source = source;
-        g.itemCode = itemCode;
         g.at = now;
         return g;
     }
@@ -56,5 +51,4 @@ public class GiftAward {
     public Instant getAt() { return at; }
     public String getByUser() { return byUser; }
     public String getSource() { return source; }
-    public String getItemCode() { return itemCode; }
 }

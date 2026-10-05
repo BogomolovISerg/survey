@@ -30,18 +30,6 @@ public class Event {
     @Column(name = "gift_enabled", nullable = false)
     private boolean giftEnabled;
 
-    /** Подарки с кодом маркировки: на стенде доступно сканирование КМ. */
-    @Column(name = "gift_marked", nullable = false)
-    private boolean giftMarked;
-
-    /** КМ обязателен: без отсканированного кода выдача подарка блокируется. */
-    @Column(name = "gift_mark_required", nullable = false)
-    private boolean giftMarkRequired;
-
-    /** Кнопки выдачи подарков в панели сотрудника. */
-    @Column(name = "gift_award_mode", nullable = false)
-    private String giftAwardMode = "both";
-
     @Column(nullable = false)
     private boolean active = true;
 
@@ -71,14 +59,11 @@ public class Event {
         return e;
     }
 
-    public void apply(String name, LocalDate startsOn, LocalDate endsOn, boolean giftEnabled, boolean giftMarked, boolean giftMarkRequired,
-                      boolean active, String theme, Instant now) {
+    public void apply(String name, LocalDate startsOn, LocalDate endsOn, boolean giftEnabled, boolean active, String theme, Instant now) {
         this.name = name == null ? "" : name.trim();
         this.startsOn = startsOn;
         this.endsOn = endsOn;
         this.giftEnabled = giftEnabled;
-        this.giftMarked = giftEnabled && giftMarked;
-        this.giftMarkRequired = giftEnabled && giftMarked && giftMarkRequired;
         this.active = active;
         this.theme = theme;
         this.updatedAt = now;
@@ -89,9 +74,6 @@ public class Event {
         this.publishedAt = now;
         this.updatedAt = now;
     }
-
-    public void setGiftAwardMode(String mode) { this.giftAwardMode = mode; }
-    public String getGiftAwardMode() { return giftAwardMode; }
 
     public void setActive(boolean active, Instant now) {
         this.active = active;
@@ -108,8 +90,6 @@ public class Event {
     public LocalDate getStartsOn() { return startsOn; }
     public LocalDate getEndsOn() { return endsOn; }
     public boolean isGiftEnabled() { return giftEnabled; }
-    public boolean isGiftMarked() { return giftMarked; }
-    public boolean isGiftMarkRequired() { return giftMarkRequired; }
     public boolean isActive() { return active; }
     public String getTheme() { return theme; }
     public int getCurrentVersion() { return currentVersion; }

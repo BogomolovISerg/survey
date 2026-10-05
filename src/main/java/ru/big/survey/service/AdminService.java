@@ -18,14 +18,11 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.big.survey.domain.Event;
-import ru.big.survey.domain.GiftItem;
 import ru.big.survey.domain.Questionnaire;
 import ru.big.survey.domain.Response;
 import ru.big.survey.domain.SyncLog;
 import ru.big.survey.domain.SyncState;
 import ru.big.survey.persistence.EventRepository;
-import ru.big.survey.persistence.GiftItemRepository;
-import ru.big.survey.persistence.ManualGiftAwardRepository;
 import ru.big.survey.persistence.QuestionnaireRepository;
 import ru.big.survey.persistence.ResponseRepository;
 import ru.big.survey.persistence.SyncLogRepository;
@@ -47,18 +44,14 @@ public class AdminService {
     private final ResponseRepository responses;
     private final SyncStateRepository states;
     private final SyncLogRepository logs;
-    private final GiftItemRepository giftItems;
-    private final ManualGiftAwardRepository manualAwards;
     private final AuditService audit;
     private final SyncService sync;
     private final Json json;
     private final Clock clock;
 
     public AdminService(EventRepository events, QuestionnaireRepository questionnaires, ResponseRepository responses,
-                        SyncStateRepository states, SyncLogRepository logs, GiftItemRepository giftItems,
-                        AuditService audit, SyncService sync, Json json, Clock clock, ManualGiftAwardRepository manualAwards) {
-        this.manualAwards = manualAwards;
-        this.giftItems = giftItems;
+                        SyncStateRepository states, SyncLogRepository logs, AuditService audit, SyncService sync,
+                        Json json, Clock clock) {
         this.events = events;
         this.questionnaires = questionnaires;
         this.responses = responses;
@@ -72,43 +65,33 @@ public class AdminService {
 
     // ---------- стенд ----------
 
-    /**
-     * Текущие мероприятия для панели стенда: активные, идущие сейчас (±7 дней) либо без дат.
-     * allowed — ограничение по назначениям (null = без ограничений, для ADMIN).
-     */
+    /** Текущие мероприятия для панели стенда: активные, идущие сейчас (±7 дней) либо без дат. */
     @Transactional(readOnly = true)
-    public List<ObjectNode> currentEvents(Set<UUID> allowed) {
+    public List<ObjectNode> currentEvents() {
         LocalDate today = LocalDate.ofInstant(clock.instant(), ZONE);
         List<ObjectNode> out = new ArrayList<>();
         for (Event e : events.findCurrent(today.minusDays(7), today.plusDays(7))) {
-            if (allowed != null && !allowed.contains(e.getId())) {
-                continue;
-            }
             out.add(eventSummary(e, false));
         }
         return out;
     }
 
-    /** Живые счётчики мероприятия. limit — сколько последних анкет вернуть (1–50). */
+    /** Живые счётчики мероприятия. */
     @Transactional(readOnly = true)
-    public ObjectNode stats(UUID eventId, int limit) {
+    public ObjectNode stats(UUID eventId) {
         Event event = requireEvent(eventId);
         Instant now = clock.instant();
         ObjectNode s = json.object();
         s.put("eventId", eventId.toString());
         s.put("eventName", event.getName());
         s.put("giftEnabled", event.isGiftEnabled());
-        s.put("giftAwardMode", event.getGiftAwardMode());
         s.put("total", responses.countByEventId(eventId));
         s.put("lastHour", responses.countByEventIdAndSubmittedAtAfter(eventId, now.minusSeconds(3600)));
         s.put("today", responses.countByEventIdAndSubmittedAtAfter(eventId,
                 LocalDate.ofInstant(now, ZONE).atStartOfDay(ZONE).toInstant()));
-        long manualCount = manualAwards.countByEventId(eventId);
-        s.put("giftsAwarded", responses.countByEventIdAndGiftAwardedTrue(eventId) + manualCount);
-        s.put("manualGiftsAwarded", manualCount);
+        s.put("giftsAwarded", responses.countByEventIdAndGiftAwardedTrue(eventId));
         ArrayNode recent = s.putArray("recent");
-        int size = Math.max(1, Math.min(limit, 50));
-        for (Response r : responses.findAllByEventIdOrderBySubmittedAtDesc(eventId, PageRequest.of(0, size)).getContent()) {
+        for (Response r : responses.findTop10ByEventIdOrderBySubmittedAtDesc(eventId)) {
             JsonNode answers = json.read(r.getAnswers());
             ObjectNode item = recent.addObject();
             item.put("responseId", r.getId().toString());
@@ -116,18 +99,6 @@ public class AdminService {
             item.put("city", GiftService.text(answers, "Город"));
             item.put("submittedAt", r.getSubmittedAt().toString());
             item.put("awarded", r.isGiftAwarded());
-            if (r.getGiftAwardedAt() != null) {
-                item.put("awardedAt", r.getGiftAwardedAt().toString());
-                item.put("awardedBy", r.getGiftAwardedBy());
-            }
-        }
-        ArrayNode manualRecent = s.putArray("recentManualGifts");
-        for (var award : manualAwards.findTop10ByEventIdOrderByAtDesc(eventId)) {
-            ObjectNode item = manualRecent.addObject();
-            item.put("awardId", award.getId().toString());
-            item.put("awardedAt", award.getAt().toString());
-            item.put("awardedBy", award.getByUser());
-            item.set("itemCodes", json.read(award.getItemCodes()));
         }
         s.put("at", now.toString());
         return s;
@@ -135,24 +106,13 @@ public class AdminService {
 
     // ---------- админка ----------
 
-    /** allowed — ограничение супервайзера (null = все мероприятия, для ADMIN). */
     @Transactional(readOnly = true)
-    public List<ObjectNode> allEvents(Set<UUID> allowed) {
+    public List<ObjectNode> allEvents() {
         List<ObjectNode> out = new ArrayList<>();
         for (Event e : events.findAllByOrderByPublishedAtDesc()) {
-            if (allowed != null && !allowed.contains(e.getId())) {
-                continue;
-            }
             out.add(eventSummary(e, true));
         }
         return out;
-    }
-
-    /** Супервайзер работает только с назначенными мероприятиями. */
-    public static void assertEventAllowed(UUID eventId, Set<UUID> allowed) {
-        if (allowed != null && !allowed.contains(eventId)) {
-            throw ApiException.forbidden("Это мероприятие вам не назначено.");
-        }
     }
 
     @Transactional(readOnly = true)
@@ -208,60 +168,9 @@ public class AdminService {
                 item.put("giftAwardedBy", r.getGiftAwardedBy());
             }
             item.put("giftCode", event.isGiftEnabled() ? r.getGiftCode() : "");
-            ArrayNode codes = item.putArray("giftItemCodes");
-            for (GiftItem gi : giftItems.findAllByResponseIdAndActiveTrueOrderByAddedAt(r.getId())) {
-                codes.add(gi.getCode());
-            }
             item.put("changeSeq", r.getChangeSeq());
             item.set("answers", json.read(r.getAnswers()));
         }
-        return node;
-    }
-
-    /**
-     * Поиск анкет по номеру телефона (только ADMIN, маршрут закрыт в SecurityConfig).
-     * Полный номер ищется точно (нормализация +7/8), частичный ввод от 4 цифр — по окончанию номера. До 50 анкет.
-     */
-    @Transactional(readOnly = true)
-    public ObjectNode searchByPhone(String query) {
-        String digits = query == null ? "" : query.replaceAll("\\D", "");
-        ObjectNode node = json.object();
-        ArrayNode items = node.putArray("items");
-        if (digits.length() < 4) {
-            node.put("error", "Введите не меньше четырёх цифр номера.");
-            return node;
-        }
-        List<Response> found;
-        String normalized = Phones.normalize(query);
-        if (normalized != null && Phones.isValid(normalized)) {
-            found = responses.findTop50ByPhoneOrderBySubmittedAtDesc(normalized);
-        } else {
-            found = responses.findByPhoneTail(digits, PageRequest.of(0, 50));
-        }
-        Map<UUID, String> eventNames = new java.util.HashMap<>();
-        for (Response r : found) {
-            JsonNode answers = json.read(r.getAnswers());
-            ObjectNode item = items.addObject();
-            item.put("id", r.getId().toString());
-            item.put("eventId", r.getEventId().toString());
-            item.put("eventName", eventNames.computeIfAbsent(r.getEventId(),
-                    id -> events.findById(id).map(Event::getName).orElse("")));
-            item.put("phone", r.getPhone());
-            item.put("visitor", GiftService.visitorName(answers));
-            item.put("city", GiftService.text(answers, "Город"));
-            item.put("submittedAt", r.getSubmittedAt().toString());
-            item.put("giftCode", r.getGiftCode());
-            item.put("giftAwarded", r.isGiftAwarded());
-            if (r.getGiftAwardedAt() != null) {
-                item.put("giftAwardedAt", r.getGiftAwardedAt().toString());
-                item.put("giftAwardedBy", r.getGiftAwardedBy());
-            }
-            ArrayNode codes = item.putArray("giftItemCodes");
-            for (GiftItem gi : giftItems.findAllByResponseIdAndActiveTrueOrderByAddedAt(r.getId())) {
-                codes.add(gi.getCode());
-            }
-        }
-        node.put("total", found.size());
         return node;
     }
 
@@ -270,11 +179,6 @@ public class AdminService {
     public void writeCsv(UUID eventId, Writer out, Actor actor) throws IOException {
         Event event = requireEvent(eventId);
         List<Response> all = responses.findAllByEventIdOrderBySubmittedAtAsc(eventId);
-        // активные коды маркировки всех ответов мероприятия — одной выборкой
-        Map<UUID, List<String>> codesByResponse = new java.util.HashMap<>();
-        for (GiftItem gi : giftItems.findActiveByEventId(eventId)) {
-            codesByResponse.computeIfAbsent(gi.getResponseId(), k -> new ArrayList<>()).add(gi.getCode());
-        }
         // порядок колонок — как в output последней версии анкеты (jsonb порядок ключей не хранит), затем прочие
         Set<String> columns = new LinkedHashSet<>();
         questionnaires.findByEventIdAndVersion(eventId, event.getCurrentVersion())
@@ -286,7 +190,7 @@ public class AdminService {
             columns.addAll(a.propertyNames());
         }
         out.write('\uFEFF'); // BOM — чтобы Excel открыл UTF-8 корректно
-        List<String> header = new ArrayList<>(List.of("Дата", "Идентификатор", "Телефон", "Версия", "Подарок", "Подарок выдан", "Кем", "Коды маркировки"));
+        List<String> header = new ArrayList<>(List.of("Дата", "Идентификатор", "Телефон", "Версия", "Подарок", "Подарок выдан", "Кем"));
         header.addAll(columns);
         writeRow(out, header);
         for (int i = 0; i < all.size(); i++) {
@@ -300,7 +204,6 @@ public class AdminService {
             row.add(r.isGiftAwarded() ? "да" : "нет");
             row.add(r.getGiftAwardedAt() == null ? "" : CSV_TIME.format(r.getGiftAwardedAt()));
             row.add(r.getGiftAwardedBy() == null ? "" : r.getGiftAwardedBy());
-            row.add(String.join("; ", codesByResponse.getOrDefault(r.getId(), List.of())));
             for (String c : columns) {
                 JsonNode v = a.get(c);
                 row.add(v == null || v.isNull() ? "" : (v.isString() ? v.stringValue() : v.toString()));
@@ -370,9 +273,6 @@ public class AdminService {
             n.put("endsOn", e.getEndsOn().toString());
         }
         n.put("giftEnabled", e.isGiftEnabled());
-        n.put("giftAwardMode", e.getGiftAwardMode());
-        n.put("giftMarked", e.isGiftMarked());
-        n.put("giftMarkRequired", e.isGiftMarkRequired());
         n.put("active", e.isActive());
         n.put("version", e.getCurrentVersion());
         n.put("publishedAt", e.getPublishedAt().toString());
@@ -382,12 +282,11 @@ public class AdminService {
         }
         if (withSync) {
             n.put("responses", responses.countByEventId(e.getId()));
-            n.put("giftsAwarded", responses.countByEventIdAndGiftAwardedTrue(e.getId()) + manualAwards.countByEventId(e.getId()));
+            n.put("giftsAwarded", responses.countByEventIdAndGiftAwardedTrue(e.getId()));
             SyncState s = states.findById(e.getId()).orElse(null);
             long acked = s == null ? 0 : s.getAckedSeq();
             n.put("ackedSeq", acked);
-            n.put("pending", responses.countByEventIdAndChangeSeqGreaterThan(e.getId(), acked)
-                    + manualAwards.countByEventIdAndChangeSeqGreaterThan(e.getId(), acked));
+            n.put("pending", responses.countByEventIdAndChangeSeqGreaterThan(e.getId(), acked));
             if (s != null && s.getLastExportAt() != null) {
                 n.put("lastExportAt", s.getLastExportAt().toString());
             }
