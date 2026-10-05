@@ -22,7 +22,7 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * Интеграционный API для 1С:ERP (роль INTEGRATION, HTTP Basic).
  *   PUT  /api/v1/sync/events/{guid}                      — публикация мероприятия и анкеты
- *   GET  /api/v1/sync/events/{guid}/responses?after=&limit= — ответы с change_seq > after
+ *   GET  /api/v1/sync/events/{guid}/responses?after=&limit= — ответы и выдачи без анкеты с change_seq > after
  *   POST /api/v1/sync/events/{guid}/responses/ack {seq}  — подтверждение курсора
  *   GET  /api/v1/sync/events/{guid}/status               — счётчики
  */
@@ -37,13 +37,15 @@ public class SyncController {
     }
 
     public record PublishRequest(@NotBlank String name, LocalDate startsOn, LocalDate endsOn, Boolean giftEnabled,
-                                 Boolean active, JsonNode theme, JsonNode questionnaire) {}
+                                 Boolean giftMarked, Boolean giftMarkRequired,
+                                 Boolean active, JsonNode theme, JsonNode questionnaire, String giftAwardMode) {}
 
     @PutMapping("/{eventId}")
     public Map<String, Object> publish(@PathVariable UUID eventId, @Valid @RequestBody PublishRequest request, Authentication auth) {
         SyncService.PublishResult result = sync.publish(eventId, new SyncService.PublishCommand(
-                request.name(), request.startsOn(), request.endsOn(), request.giftEnabled(), request.active(),
-                request.theme(), request.questionnaire()), auth.getName());
+                request.name(), request.startsOn(), request.endsOn(), request.giftEnabled(),
+                request.giftMarked(), request.giftMarkRequired(), request.active(),
+                request.theme(), request.questionnaire(), request.giftAwardMode()), auth.getName());
         return Map.of(
                 "eventId", result.eventId().toString(),
                 "version", result.version(),

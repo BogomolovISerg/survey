@@ -28,6 +28,12 @@ public class AuditService {
         logs.save(SyncLog.of(eventId, kind, actor, "OK", json.write(details), clock.instant()));
     }
 
+    /** Успешная выдача без анкеты и запись журнала фиксируются одной транзакцией. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void okInTransaction(UUID eventId, String kind, String actor, Map<String, ?> details) {
+        logs.save(SyncLog.of(eventId, kind, actor, "OK", json.write(details), clock.instant()));
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void error(UUID eventId, String kind, String actor, Map<String, ?> details) {
         logs.save(SyncLog.of(eventId, kind, actor, "ERROR", json.write(details), clock.instant()));

@@ -71,6 +71,8 @@ public class ResponseService {
         e.put("id", event.getId().toString());
         e.put("name", event.getName());
         e.put("gift", event.isGiftEnabled());
+        e.put("giftMarked", event.isGiftMarked());
+        e.put("giftMarkRequired", event.isGiftMarkRequired());
         e.put("active", event.isActive());
         if (event.getTheme() != null) {
             e.set("theme", json.read(event.getTheme()));

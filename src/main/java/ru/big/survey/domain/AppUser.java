@@ -12,6 +12,7 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -36,11 +37,21 @@ public class AppUser {
     @Column(nullable = false)
     private boolean active = true;
 
+    /** При коде маркировки «не в обороте»: true — блокировать выдачу, false — только предупреждать. */
+    @Column(name = "block_rejected_marks", nullable = false)
+    private boolean blockRejectedMarks = true;
+
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "app_user_role", joinColumns = @JoinColumn(name = "user_id"))
     @Enumerated(EnumType.STRING)
     @Column(name = "role", nullable = false, length = 32)
     private Set<Role> roles = EnumSet.noneOf(Role.class);
+
+    /** Мероприятия, назначенные сотруднику (для роли STAFF). Пусто у ADMIN/INTEGRATION. */
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "app_user_event", joinColumns = @JoinColumn(name = "user_id"))
+    @Column(name = "event_id", nullable = false)
+    private Set<UUID> eventIds = new HashSet<>();
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
@@ -70,8 +81,21 @@ public class AppUser {
         this.updatedAt = now;
     }
 
+    public void setEvents(Set<UUID> ids, Instant now) {
+        this.eventIds.clear();
+        if (ids != null) {
+            this.eventIds.addAll(ids);
+        }
+        this.updatedAt = now;
+    }
+
     public void setActive(boolean active, Instant now) {
         this.active = active;
+        this.updatedAt = now;
+    }
+
+    public void setBlockRejectedMarks(boolean blockRejectedMarks, Instant now) {
+        this.blockRejectedMarks = blockRejectedMarks;
         this.updatedAt = now;
     }
 
@@ -84,7 +108,9 @@ public class AppUser {
     public String getDisplayName() { return displayName; }
     public String getPasswordHash() { return passwordHash; }
     public boolean isActive() { return active; }
+    public boolean isBlockRejectedMarks() { return blockRejectedMarks; }
     public Set<Role> getRoles() { return Set.copyOf(roles); }
+    public Set<UUID> getEventIds() { return Set.copyOf(eventIds); }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 }

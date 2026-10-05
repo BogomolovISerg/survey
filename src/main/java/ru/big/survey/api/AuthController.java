@@ -4,6 +4,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.constraints.NotBlank;
 import java.util.Map;
+import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -81,6 +82,8 @@ public class AuthController {
                 "username", user.getUsername(),
                 "displayName", user.getDisplayName(),
                 "roles", user.getRoles().stream().map(Enum::name).sorted().toList(),
-                "active", user.isActive());
+                "active", user.isActive(),
+                "blockRejectedMarks", user.isBlockRejectedMarks(),
+                "events", user.getEventIds().stream().map(UUID::toString).sorted().toList());
     }
 }

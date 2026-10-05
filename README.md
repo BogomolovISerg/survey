@@ -7,6 +7,18 @@
 
 Стек: Java 21 · Spring Boot 4.0 · PostgreSQL · React 19 + TypeScript + Vite · WAR во внешнем Tomcat 11 за nginx.
 
+## Ветки
+
+- **`main`** — версия для приёмки маркетологами: анкета, подарки по QR (сотрудник сканирует QR с экрана посетителя
+  **штатной камерой телефона** — открывается ссылка панели стенда), назначения сотрудников, админка. Встроенного сканера
+  и маркировки подарков здесь нет.
+- **`camera`** — отдельный проект/тестирование: встроенный сканер в панели стенда (камера в приложении, QR + DataMatrix),
+  маркированные подарки (флаги мероприятия из 1С, код маркировки в ответе/выгрузке/регистре, блокировка выдачи без КМ),
+  миграции V3–V4. Содержит все изменения `main`; после приёмки сливается в `main`.
+
+Конфигурация 1С общая: флажки маркировки и ресурс `КодМаркировки` уже есть в ERPServer1 — сервис `main` лишние поля
+публикации игнорирует, а `КодМаркировки` в регистр пишется пустым.
+
 ## Структура
 
 ```
@@ -21,6 +33,7 @@ src/main/java/ru/big/survey/
   api/       PublicController, SyncController, StaffController, AdminController, AuthController, SpaController
 src/main/resources/application.yml, db/migration/V1__survey_schema.sql
 frontend/  React-приложение: /e/{guid} анкета, /staff панель стенда, /admin админка
+           public/consent.pdf — согласие на обработку ПД (ссылка у галки перед отправкой; заменить файл и пересобрать WAR)
 deploy/    tomcat/application.example.yml, nginx/*.conf, db/create_database.sql
 onec/      изменения в ERPServer1 (модуль обмена, реквизиты, форма, регламент) — описание и исходники
 ```
@@ -35,8 +48,8 @@ onec/      изменения в ERPServer1 (модуль обмена, рекв
 | `POST …/{guid}/responses` `{token, answers, consent}` | посетитель | ответ; 409 `already_submitted` с данными подарка |
 | `GET …/{guid}/gift?token=` | посетитель | статус подарка, `giftToken/giftCode/giftUrl` для QR |
 | `POST /api/v1/auth/login|logout`, `GET /api/v1/auth/me` | персонал | сессия в cookie |
-| `GET /api/v1/staff/events`, `GET …/{guid}/stats` | STAFF/ADMIN | мероприятия, живые счётчики |
-| `POST /api/v1/staff/gift/lookup|award` `{token}` или `{eventId, code}` | STAFF/ADMIN | карточка посетителя (без телефона), выдача/снятие |
+| `GET /api/v1/staff/events`, `GET …/{guid}/stats` | STAFF/ADMIN | мероприятия (STAFF — только назначенные администратором), живые счётчики |
+| `POST /api/v1/staff/gift/lookup|award` `{token}` или `{eventId, code}` | STAFF/ADMIN | карточка посетителя (без телефона), выдача/снятие; STAFF — только по назначенным мероприятиям |
 | `GET/PATCH /api/v1/admin/events…`, `…/responses`, `…/export.csv`, `/admin/log`, `/admin/users` | ADMIN | админка |
 | `PUT /api/v1/sync/events/{guid}` | INTEGRATION (Basic) | публикация мероприятия + анкеты (идемпотентно по checksum) |
 | `GET …/{guid}/responses?after=&limit=` | INTEGRATION | ответы с `change_seq > after` (изменение подарка приходит повторно) |
@@ -90,7 +103,8 @@ cd frontend && npm run dev                   # фронт на :5173 с прок
    (`http://<внутренний-адрес>/survey` — именно этот адрес указывается в `УстановитьНастройкиОбмена`, а `public-base-url`
    в конфиге приложения остаётся внешним `https://survey.bigcom.ru/survey`).
 6. **Первый вход:** `https://survey.bigcom.ru/survey/admin` — логин `admin` и пароль из `bootstrap-admin` (создаётся, только
-   пока реестр пуст). Создать пользователей: `erp` (роль INTEGRATION — для 1С), промоутеров (STAFF).
+   пока реестр пуст). Создать пользователей: `erp` (роль INTEGRATION — для 1С), промоутеров (STAFF) — и в карточке
+   пользователя назначить каждому промоутеру его мероприятия (без назначения панель стенда пуста); там же кнопка «Сменить пароль».
 7. **1С:** `бигАнкетированиеОбменСервер.УстановитьНастройкиОбмена("http://<внутренний-адрес>/survey", "erp", "пароль")`,
    далее кнопки в карточке мероприятия (см. `onec/README.md`).
 

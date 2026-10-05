@@ -88,6 +88,10 @@ export function ComponentBlock(props: Props) {
     if (validate()) onNext();
   };
 
+  /** Блок заполнен: обязательные поля есть, телефон (если он здесь) подтверждён — иначе «Далее» неактивна, как «Отправить». */
+  const phoneOk = !hasPhoneField(component) || (phone !== null && phone.phone === normalizePhone(findPhoneValue()));
+  const canProceed = missingRequired(component, answers).length === 0 && phoneOk;
+
   const onRadio = (field: string, value: string) => {
     setAnswer(field, value);
     setInvalid((s) => {
@@ -228,7 +232,7 @@ export function ComponentBlock(props: Props) {
       })}
       {message && <div className="alert error small">{message}</div>}
       {!passed && !singleChoice && depth === 0 && (
-        <button type="button" className="block mt" onClick={next}>Далее</button>
+        <button type="button" className="block mt" disabled={!canProceed} onClick={next}>Далее</button>
       )}
     </section>
   );

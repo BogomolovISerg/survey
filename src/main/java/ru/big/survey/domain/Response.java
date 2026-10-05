@@ -49,6 +49,10 @@ public class Response {
     @Column(name = "gift_code", nullable = false, length = 8)
     private String giftCode;
 
+    /** Код выданного подарка (QR/DataMatrix маркировки), отсканированный сотрудником. */
+    @Column(name = "gift_item_code", length = 512)
+    private String giftItemCode;
+
     @Column(name = "change_seq", nullable = false)
     private long changeSeq;
 
@@ -83,8 +87,30 @@ public class Response {
         this.giftAwarded = awarded;
         this.giftAwardedAt = awarded ? now : null;
         this.giftAwardedBy = awarded ? byUser : null;
+        if (!awarded) {
+            this.giftItemCode = null;
+        }
         this.changeSeq = changeSeq;
         return true;
+    }
+
+    /**
+     * Спорное снятие отметки администратором («мне ничего не выдавали»): галка снимается,
+     * но дата/автор выдачи и коды маркировки сохраняются; выдача повторно возможна.
+     */
+    public boolean disputeGift(long changeSeq) {
+        if (!this.giftAwarded) {
+            return false;
+        }
+        this.giftAwarded = false;
+        this.changeSeq = changeSeq;
+        return true;
+    }
+
+    /** Сводка активных кодов маркировки (через запятую) — для CSV и совместимости выгрузки в 1С. */
+    public void setItemCodeSummary(String summary) {
+        this.giftItemCode = summary == null || summary.isEmpty() ? null
+                : summary.length() > 512 ? summary.substring(0, 512) : summary;
     }
 
     public UUID getId() { return id; }
@@ -98,6 +124,7 @@ public class Response {
     public Instant getGiftAwardedAt() { return giftAwardedAt; }
     public String getGiftAwardedBy() { return giftAwardedBy; }
     public String getGiftCode() { return giftCode; }
+    public String getGiftItemCode() { return giftItemCode; }
     public long getChangeSeq() { return changeSeq; }
     public String getClient() { return client; }
 }

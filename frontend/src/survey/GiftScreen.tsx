@@ -13,24 +13,22 @@ interface Props {
 
 /**
  * Экран подарка: QR-код (ссылка с подписанным токеном для панели стенда) и короткий код.
- * Промоутер сканирует QR штатной камерой телефона; статус «выдан» подтягивается опросом каждые 10 с.
+ * Статус подтягивается опросом каждые 10 с в обе стороны: «выдан» после выдачи на стенде
+ * и обратно к QR, если администратор снял отметку выдачи (спор — повторная выдача).
  */
 export function GiftScreen({ eventId, eventName, gift: initial, token }: Props) {
   const [gift, setGift] = useState<GiftInfo>(initial);
 
   useEffect(() => {
-    if (gift.awarded) return;
     const id = window.setInterval(async () => {
       try {
-        const g = await publicApi.gift(eventId, token);
-        setGift(g);
-        if (g.awarded) window.clearInterval(id);
+        setGift(await publicApi.gift(eventId, token));
       } catch {
         /* сеть моргнула — попробуем в следующий раз */
       }
     }, 10000);
     return () => window.clearInterval(id);
-  }, [eventId, token, gift.awarded]);
+  }, [eventId, token]);
 
   if (!gift.enabled) return null;
 
@@ -44,7 +42,7 @@ export function GiftScreen({ eventId, eventName, gift: initial, token }: Props) 
         </>
       ) : (
         <>
-          <p className="muted small">Покажите этот экран промоутеру на стенде — он отсканирует QR-код камерой телефона.</p>
+          <p className="muted small">Покажите этот экран сотруднику на стенде — он отсканирует QR-код камерой телефона.</p>
           {gift.giftUrl && <QrCode value={gift.giftUrl} label="QR-код подарка" />}
           {gift.giftCode && (
             <>

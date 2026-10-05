@@ -36,6 +36,16 @@ public interface ResponseRepository extends JpaRepository<Response, UUID> {
 
     List<Response> findTop10ByEventIdOrderBySubmittedAtDesc(UUID eventId);
 
+    List<Response> findTop50ByPhoneOrderBySubmittedAtDesc(String phone);
+
+    /** Поиск по окончанию номера (частичный ввод администратора). */
+    @Query("""
+            select r from Response r
+            where r.phone like concat('%', :tail)
+            order by r.submittedAt desc
+            """)
+    List<Response> findByPhoneTail(@Param("tail") String tail, Pageable pageable);
+
     Page<Response> findAllByEventIdOrderBySubmittedAtDesc(UUID eventId, Pageable pageable);
 
     List<Response> findAllByEventIdOrderBySubmittedAtAsc(UUID eventId);
